@@ -7,11 +7,10 @@ import csv
 import os
 from datetime import datetime
 
-# 📁 Criar/Garantir a pasta dedicada para os ficheiros CSV
+# 📁 Criar pasta para logs
 LOG_DIR = "dados_voo"
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# 🕒 Definir nome do ficheiro CSV com Data e Hora marcadas (ex: voo_cansat_2026-08-26_03-00-15.csv)
 session_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 csv_filename = os.path.join(LOG_DIR, f"voo_cansat_{session_time}.csv")
 
@@ -19,7 +18,6 @@ latest_packet = None
 flight_history = []
 CONNECTED_CLIENTS = set()
 
-# Cabeçalho completo do CSV
 csv_headers = [
     "id", "tempo", "estado", "altitude", "velocidade", "forca_g", "aceleracao",
     "temperatura", "humidade", "pressao", "eco2", "tvoc", "uv", "lux",
@@ -35,7 +33,7 @@ def init_csv(filename):
 init_csv(csv_filename)
 print(f"💾 [Logger] Gravação automática de dados ativa em: {csv_filename}")
 
-# --- THREAD UDP (Recebe dados e escreve na pasta dados_voo/) ---
+# --- THREAD UDP ---
 def udp_receiver():
     global latest_packet, flight_history
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -50,6 +48,10 @@ def udp_receiver():
             latest_packet = payload
             flight_history.append(payload)
             
+            # Enviar em tempo real para todos os clientes conectados via WebSocket
+            if CONNECTED_CLIENTS:
+                asyncio.run_coroutine_threadsafe(broadcast(payload), loop)
+
             parsed = json.loads(payload)
             row = [parsed.get(h, "") for h in csv_headers]
             with open(csv_filename, mode='a', newline='', encoding='utf-8') as f:
@@ -58,17 +60,29 @@ def udp_receiver():
         except Exception:
             pass
 
-# --- WEBSOCKET SERVER ---
+async def broadcast(message):
+    if CONNECTED_CLIENTS:
+        await asyncio.gather(*(client.send(message) for client in CONNECTED_CLIENTS), return_exceptions=True)
+
+# --- WEBSOCKET SERVER (Sempre atento e responsivo) ---
 async def ws_handler(websocket):
+    global flight_history, latest_packet
     CONNECTED_CLIENTS.add(websocket)
     try:
+        # 1. Enviar histórico anterior para o cliente que acabou de se ligar
         for past_packet in flight_history:
             await websocket.send(past_packet)
             
-        while True:
-            if latest_packet is not None:
-                await websocket.send(latest_packet)
-            await asyncio.sleep(0.2)
+        # 2. Manter a conexão viva e escutar comandos (como o limpar dados) em paralelo
+        async for message in websocket:
+            try:
+                data = json.loads(message)
+                if data.get("action") == "clear":
+                    flight_history = []
+                    latest_packet = None
+                    print("🗑️ [Server] Histórico de voo limpo a pedido do cliente.")
+            except Exception:
+                pass
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
@@ -259,7 +273,6 @@ HTML_CODE = """<!DOCTYPE html>
             } catch(e) {}
         };
 
-        // Exportar CSV com data e hora no nome do ficheiro descarregado
         function downloadCSV() {
             if (rawDataLog.length === 0) {
                 alert("Não existem dados acumulados para exportar.");
@@ -310,6 +323,11 @@ HTML_CODE = """<!DOCTYPE html>
             });
             document.getElementById('metrics').innerHTML = "";
             document.getElementById('status').innerText = "PAINEL LIMPO / AGUARDANDO NOVO VOO";
+
+            // 🗑️ Avisa o servidor Python para limpar o histórico
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action: "clear" }));
+            }
         }
     </script>
 </body>
@@ -329,10 +347,15 @@ class SimpleHTTPHandler(BaseHTTPRequestHandler):
 
 def run_http_server():
     server = HTTPServer(('127.0.0.1', 8050), SimpleHTTPHandler)
-    print("🌐 [Web Server] Servidor ativo em http://127.0.0.1:8050")
+    print("🌐 [Web Server] Aceda ao site em: http://127.0.0.1:8050")
     server.serve_forever()
 
+loop = None
+
 async def main():
+    global loop
+    loop = asyncio.get_running_loop()
+    
     threading.Thread(target=udp_receiver, daemon=True).start()
     threading.Thread(target=run_http_server, daemon=True).start()
     
