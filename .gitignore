@@ -1,0 +1,7 @@
+# Ignorar o ambiente virtual e ficheiros temporários no Git
+pip/
+*.o
+moc_*
+groundstation
+simulador/simulador
+estacao/estacao
