@@ -4,18 +4,22 @@ import json
 import websockets
 import threading
 import csv
+import os
 from datetime import datetime
 
-# Guardar o histórico em memória e definir ficheiro CSV de saída
+# 📁 Criar/Garantir a pasta dedicada para os ficheiros CSV
+LOG_DIR = "dados_voo"
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# 🕒 Definir nome do ficheiro CSV com Data e Hora marcadas (ex: voo_cansat_2026-08-26_03-00-15.csv)
+session_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+csv_filename = os.path.join(LOG_DIR, f"voo_cansat_{session_time}.csv")
+
 latest_packet = None
 flight_history = []
 CONNECTED_CLIENTS = set()
 
-# Criar ficheiro CSV único para esta sessão de voo
-session_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-csv_filename = f"voo_cansat_{session_time}.csv"
-
-# Gravar cabeçalho do CSV
+# Cabeçalho completo do CSV
 csv_headers = [
     "id", "tempo", "estado", "altitude", "velocidade", "forca_g", "aceleracao",
     "temperatura", "humidade", "pressao", "eco2", "tvoc", "uv", "lux",
@@ -29,9 +33,9 @@ def init_csv(filename):
         writer.writerow(csv_headers)
 
 init_csv(csv_filename)
-print(f"💾 [Logger] Gravação de dados ativa em: {csv_filename}")
+print(f"💾 [Logger] Gravação automática de dados ativa em: {csv_filename}")
 
-# --- THREAD UDP PURA (Escuta a porta 5005 e grava no CSV) ---
+# --- THREAD UDP (Recebe dados e escreve na pasta dados_voo/) ---
 def udp_receiver():
     global latest_packet, flight_history
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -46,7 +50,6 @@ def udp_receiver():
             latest_packet = payload
             flight_history.append(payload)
             
-            # Escrever diretamente no ficheiro CSV
             parsed = json.loads(payload)
             row = [parsed.get(h, "") for h in csv_headers]
             with open(csv_filename, mode='a', newline='', encoding='utf-8') as f:
@@ -55,7 +58,7 @@ def udp_receiver():
         except Exception:
             pass
 
-# --- WEBSOCKET SERVER (Envia dados em tempo real) ---
+# --- WEBSOCKET SERVER ---
 async def ws_handler(websocket):
     CONNECTED_CLIENTS.add(websocket)
     try:
@@ -100,7 +103,7 @@ HTML_CODE = """<!DOCTYPE html>
         .val { font-weight: bold; color: #38bdf8; text-align: right; }
         h3 { margin-top: 0; font-size: 1.1em; color: #cbd5e1; }
 
-        /* Estilos do Modal de Confirmação */
+        /* Modal de Confirmação */
         .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center; }
         .modal-box { background: #1e293b; padding: 24px; border-radius: 12px; max-width: 420px; width: 90%; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5); text-align: center; border: 1px solid #334155; }
         .modal-title { font-size: 1.2em; font-weight: bold; margin-bottom: 12px; color: #f8fafc; }
@@ -154,7 +157,6 @@ HTML_CODE = """<!DOCTYPE html>
     </div>
 
     <script>
-        // 🔒 Proteção contra REFRESH acidental
         window.addEventListener("beforeunload", function (e) {
             e.preventDefault();
             e.returnValue = "Tens a certeza que queres recarregar a página? A transmissão ao vivo será interrompida.";
@@ -257,7 +259,7 @@ HTML_CODE = """<!DOCTYPE html>
             } catch(e) {}
         };
 
-        // Função para exportar CSV
+        // Exportar CSV com data e hora no nome do ficheiro descarregado
         function downloadCSV() {
             if (rawDataLog.length === 0) {
                 alert("Não existem dados acumulados para exportar.");
@@ -270,12 +272,15 @@ HTML_CODE = """<!DOCTYPE html>
             const blob = new Blob([csv], { type: 'text/csv' });
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
+            
+            const now = new Date();
+            const timestamp = now.toISOString().replace('T', '_').replace(/:/g, '-').slice(0, 19);
+            
             a.setAttribute('href', url);
-            a.setAttribute('download', `cansat_telemetria_${Date.now()}.csv`);
+            a.setAttribute('download', `voo_cansat_${timestamp}.csv`);
             a.click();
         }
 
-        // --- LÓGICA DO MODAL ---
         function openClearModal() {
             if (rawDataLog.length === 0) {
                 alert("O painel já se encontra sem dados.");
@@ -298,15 +303,11 @@ HTML_CODE = """<!DOCTYPE html>
 
         function clearDashboard() {
             rawDataLog = [];
-            
-            // Limpa o conteúdo dos gráficos
             Object.values(charts).forEach(chart => {
                 chart.data.labels = [];
                 chart.data.datasets[0].data = [];
                 chart.update('none');
             });
-
-            // Limpa a tabela lateral
             document.getElementById('metrics').innerHTML = "";
             document.getElementById('status').innerText = "PAINEL LIMPO / AGUARDANDO NOVO VOO";
         }
