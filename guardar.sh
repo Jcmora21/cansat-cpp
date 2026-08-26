@@ -1,5 +1,5 @@
 #!/bin/bash
-# Script para guardar e sincronizar com o novo repositório Git
+# Script para guardar e sincronizar com o repositório Git
 
 cd ~/cansat-cpp || exit
 
@@ -8,9 +8,10 @@ if [ ! -d ".git" ]; then
     echo "⚙️ A inicializar repositório Git local..."
     git init
     git branch -M main
-    
-    read -p "🔗 Cole o URL do NOVO repositório GitHub (ex: https://github.com/utilizador/cansat-cpp.git): " repo_url
-    git remote add origin "$repo_url"
+    git remote add origin https://github.com/Jcmora21/cansat-cpp.git
+else
+    # Garante que o remote está correto mesmo se já existir .git
+    git remote set-url origin https://github.com/Jcmora21/cansat-cpp.git
 fi
 
 # Pedir mensagem de commit
@@ -26,4 +27,4 @@ git commit -m "$msg"
 echo "🚀 A enviar alterações para o GitHub..."
 git push -u origin main
 
-echo "✅ Alterações guardadas com sucesso no novo repositório!"
+echo "✅ Alterações guardadas com sucesso no repositório!"
