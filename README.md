@@ -32,9 +32,12 @@ cansat-cpp/
 No ambiente Linux/Ubuntu (via Termux/PROOT), garante que tens instaladas as seguintes dependências:
 
 * **Python 3** (com a biblioteca `websockets`):
+
 ```bash
   pip install websockets```
+
 * **Compilador C++ (g++)**:
+
 ```bash
   apt update && apt install g++ -y```
 
