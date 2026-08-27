@@ -76,17 +76,25 @@ cd simulador
 ### Passo a Passo do Teste de Voo:
 
 1. **Abrir dois terminais** (ou duas abas do Termux/Ubuntu).
-2. **No Terminal 1:** Arranca a Ground Station (`python3 groundstation_clean.py`).
-3. **No Navegador:** Abre a página `http://127.0.0.1:8050`. Vais ver os painéis a zeros, à espera de pacotes.
-4. **No Terminal 2:** Vai à pasta `simulador` e executa `./simulador`.
-5. **Acompanhar o Voo:**
+2. **No Terminal 1:** Arranca a Ground Station
+```bash
+python3 groundstation_clean.py
+```
+4. **No Navegador:** Abre a página `http://127.0.0.1:8050`. Vais ver os painéis a zeros, à espera de pacotes.
+5. **No Terminal 2:** Vai à pasta `simulador` e compila e executa `./simulador`.
+```bash
+cd simulador/
+./compilar
+./simulador
+```
+7. **Acompanhar o Voo:**
    * Os gráficos começam a desenhar as curvas em tempo real.
    * As etiquetas das fases do voo (**Subida**, **Apogeu**, **Descida**) aparecem automaticamente nos gráficos à medida que ocorrem as transições.
    * Os KPIs (Máx, Mín, Média) atualizam-se no topo de cada gráfico.
-6. **Encerrar a Simulação:**
+8. **Encerrar a Simulação:**
    * Assim que o CanSat aterrar (ou quando quiseres parar), vai ao **Terminal 2** e clica em `Ctrl + C`.
    * Vai ao **Terminal 1** e clica em `Ctrl + C` para fechar o servidor.
-7. **Ver os Dados:** Acede à pasta `dados_voo/` para encontrares o ficheiro `.csv` completo criado durante essa sessão.
+9. **Ver os Dados:** Acede à pasta `dados_voo/` para encontrares o ficheiro `.csv` completo criado durante essa sessão.
 
 ---
 
