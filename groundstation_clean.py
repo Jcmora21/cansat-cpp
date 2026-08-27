@@ -93,10 +93,11 @@ HTML_CODE = """<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CanSat Ground Station Live</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@2.2.1"></script>
     <style>
         body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 12px; }
-        .header { display: flex; justify-content: space-between; align-items: center; background: #1e293b; padding: 12px 20px; border-radius: 8px; margin-bottom: 12px; }
-        .actions { display: flex; gap: 10px; align-items: center; }
+        .header { display: flex; justify-content: space-between; align-items: center; background: #1e293b; padding: 12px 20px; border-radius: 8px; margin-bottom: 12px; flex-wrap: wrap; gap: 10px; }
+        .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
         .status { font-weight: bold; padding: 6px 14px; border-radius: 20px; background: #334155; color: #38bdf8; font-size: 0.9em; }
         .btn { border: none; padding: 8px 14px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 0.85em; }
         .btn-export { background: #0284c7; color: white; }
@@ -107,14 +108,25 @@ HTML_CODE = """<!DOCTYPE html>
         .btn-clear:hover { background: #dc2626; }
         .btn-cancel { background: #64748b; color: white; }
         .btn-cancel:hover { background: #475569; }
-        .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; }
-        @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
-        .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-        .card { background: #1e293b; padding: 10px; border-radius: 8px; }
-        .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; max-height: 520px; overflow-y: auto; padding-right: 4px; }
+
+        /* Painel de Telemetria no Topo */
+        .telemetry-card { background: #1e293b; padding: 12px; border-radius: 8px; margin-bottom: 12px; }
+        .telemetry-card h3 { margin-top: 0; margin-bottom: 8px; font-size: 1.05em; color: #cbd5e1; }
+        .metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 6px; max-height: 220px; overflow-y: auto; padding-right: 4px; }
         .box { background: #0f172a; padding: 6px 10px; border-radius: 4px; display: flex; justify-content: space-between; font-size: 0.85em; }
         .val { font-weight: bold; color: #38bdf8; text-align: right; }
-        h3 { margin-top: 0; font-size: 1.1em; color: #cbd5e1; }
+
+        /* Grelha de Gráficos (2 por linha) */
+        .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        @media (max-width: 900px) { .charts-grid { grid-template-columns: 1fr; } }
+
+        /* Card do Gráfico com Indicadores KPI */
+        .card { background: #1e293b; padding: 12px; border-radius: 8px; display: flex; flex-direction: column; justify-content: space-between; }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .card-title { font-weight: bold; font-size: 0.95em; color: #e2e8f0; }
+        .kpi-container { display: flex; gap: 8px; font-size: 0.75em; background: #0f172a; padding: 3px 8px; border-radius: 4px; border: 1px solid #334155; }
+        .kpi-item { color: #94a3b8; }
+        .kpi-val { font-weight: bold; color: #38bdf8; }
 
         /* Modal de Confirmação */
         .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center; }
@@ -137,25 +149,16 @@ HTML_CODE = """<!DOCTYPE html>
         </div>
     </div>
 
-    <div class="grid">
-        <div class="charts">
-            <div class="card"><canvas id="chartAlt"></canvas></div>
-            <div class="card"><canvas id="chartVel"></canvas></div>
-            <div class="card"><canvas id="chartG"></canvas></div>
-            <div class="card"><canvas id="chartCO2"></canvas></div>
-            <div class="card"><canvas id="chartTemp"></canvas></div>
-            <div class="card"><canvas id="chartPress"></canvas></div>
-            <div class="card"><canvas id="chartHum"></canvas></div>
-            <div class="card"><canvas id="chartUV"></canvas></div>
-        </div>
-
-        <div class="card">
-            <h3>📊 Telemetria Completa ao Vivo</h3>
-            <div class="metrics" id="metrics"></div>
-        </div>
+    <!-- Painel de Telemetria Completa no Topo -->
+    <div class="telemetry-card">
+        <h3>📊 Telemetria Completa ao Vivo</h3>
+        <div class="metrics" id="metrics"></div>
     </div>
 
-    <!-- Modal de Confirmação Personalizado -->
+    <!-- Grelha de Gráficos (2 por linha) -->
+    <div class="charts-grid" id="chartsContainer"></div>
+
+    <!-- Modal de Confirmação -->
     <div id="clearModal" class="modal-overlay">
         <div class="modal-box">
             <div class="modal-title">⚠️ Desejas Guardar os Dados?</div>
@@ -175,6 +178,38 @@ HTML_CODE = """<!DOCTYPE html>
         });
 
         let rawDataLog = [];
+        let currentState = null;
+        let lastPhaseTime = -999; 
+        let lastPhaseLabelTime = ""; 
+
+        const chartConfigs = [
+            { id: 'chartAlt', key: 'altitude', label: 'Altitude (m)', color: '#38bdf8' },
+            { id: 'chartVel', key: 'velocidade', label: 'Velocidade (m/s)', color: '#fbbf24' },
+            { id: 'chartG', key: 'forca_g', label: 'Força-G (g)', color: '#f43f5e' },
+            { id: 'chartCO2', key: 'eco2', label: 'eCO2 (ppm)', color: '#34d399' },
+            { id: 'chartTemp', key: 'temperatura', label: 'Temperatura (°C)', color: '#ec4899' },
+            { id: 'chartPress', key: 'pressao', label: 'Pressão (hPa)', color: '#8b5cf6' },
+            { id: 'chartHum', key: 'humidade', label: 'Humidade (%)', color: '#06b6d4' },
+            { id: 'chartUV', key: 'uv', label: 'Índice UV', color: '#eab308' }
+        ];
+
+        // Construir HTML dos Cartões dos Gráficos com Indicadores: Mín, Máx, Méd
+        const container = document.getElementById('chartsContainer');
+        chartConfigs.forEach(cfg => {
+            container.innerHTML += `
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title" style="color: ${cfg.color}">${cfg.label}</span>
+                        <div class="kpi-container">
+                            <span class="kpi-item">Mín: <span class="kpi-val" id="min-${cfg.id}">-</span></span>
+                            <span class="kpi-item">Máx: <span class="kpi-val" id="max-${cfg.id}">-</span></span>
+                            <span class="kpi-item">Méd: <span class="kpi-val" id="avg-${cfg.id}">-</span></span>
+                        </div>
+                    </div>
+                    <canvas id="${cfg.id}"></canvas>
+                </div>
+            `;
+        });
 
         function makeChart(id, label, color) {
             const ctx = document.getElementById(id).getContext('2d');
@@ -192,8 +227,8 @@ HTML_CODE = """<!DOCTYPE html>
                                 color: '#94a3b8',
                                 font: { size: 10 },
                                 autoSkip: true,
-                                maxTicksLimit: 10,     // Limita estritamente a 10 valores no eixo X
-                                maxRotation: 0,        // Força o texto na horizontal sem rotação
+                                maxTicksLimit: 10,
+                                maxRotation: 0,
                                 minRotation: 0,
                                 callback: function(value) {
                                     const rawLabel = this.getLabelForValue(value);
@@ -207,31 +242,72 @@ HTML_CODE = """<!DOCTYPE html>
                             grid: { color: '#334155' },
                             ticks: { color: '#94a3b8' } 
                         } 
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        annotation: {
+                            annotations: {}
+                        }
                     }
                 }
             });
         }
-
-        const chartConfigs = [
-            { id: 'chartAlt', label: 'Altitude (m)', color: '#38bdf8' },
-            { id: 'chartVel', label: 'Velocidade (m/s)', color: '#fbbf24' },
-            { id: 'chartG', label: 'Força-G (g)', color: '#f43f5e' },
-            { id: 'chartCO2', label: 'eCO2 (ppm)', color: '#34d399' },
-            { id: 'chartTemp', label: 'Temperatura (°C)', color: '#ec4899' },
-            { id: 'chartPress', label: 'Pressão (hPa)', color: '#8b5cf6' },
-            { id: 'chartHum', label: 'Humidade (%)', color: '#06b6d4' },
-            { id: 'chartUV', label: 'Índice UV', color: '#eab308' }
-        ];
 
         const charts = {};
         chartConfigs.forEach(cfg => {
             charts[cfg.id] = makeChart(cfg.id, cfg.label, cfg.color);
         });
 
-        function pushData(chart, label, val) {
-            chart.data.labels.push(label);
-            chart.data.datasets[0].data.push(val);
-            chart.update('none');
+        function updateKPIs(cfgId, dataArray) {
+            const validData = dataArray.filter(v => v !== undefined && v !== null && !isNaN(v));
+            if (validData.length === 0) return;
+
+            const min = Math.min(...validData);
+            const max = Math.max(...validData);
+            const avg = validData.reduce((a, b) => a + b, 0) / validData.length;
+
+            document.getElementById(`min-${cfgId}`).innerText = Number.isInteger(min) ? min : min.toFixed(1);
+            document.getElementById(`max-${cfgId}`).innerText = Number.isInteger(max) ? max : max.toFixed(1);
+            document.getElementById(`avg-${cfgId}`).innerText = avg.toFixed(1);
+        }
+
+        function addPhaseLine(label, timeLabel, numericTime) {
+            const annotationId = 'line_' + Date.now();
+            
+            let labelPosition = 'start';
+            let targetXLabel = timeLabel;
+
+            // Se o estado for detetado quase em simultâneo (diferença <= 2 segundos),
+            // encosta a nova etiqueta à MESMA reta vertical do evento anterior.
+            if (Math.abs(numericTime - lastPhaseTime) <= 2 && lastPhaseLabelTime !== "") {
+                targetXLabel = lastPhaseLabelTime;
+                labelPosition = 'end'; // Coloca a segunda etiqueta no topo da mesma reta
+            } else {
+                lastPhaseLabelTime = timeLabel;
+            }
+            lastPhaseTime = numericTime;
+
+            chartConfigs.forEach(cfg => {
+                const chart = charts[cfg.id];
+                chart.options.plugins.annotation.annotations[annotationId] = {
+                    type: 'line',
+                    xMin: targetXLabel,
+                    xMax: targetXLabel,
+                    borderColor: '#f59e0b',
+                    borderWidth: 2,
+                    borderDash: [4, 4],
+                    label: {
+                        display: true,
+                        content: label,
+                        position: labelPosition,
+                        backgroundColor: 'rgba(245, 158, 11, 0.85)',
+                        color: '#0f172a',
+                        font: { size: 9, weight: 'bold' },
+                        padding: 2
+                    }
+                };
+                chart.update('none');
+            });
         }
 
         const ws = new WebSocket("ws://" + window.location.hostname + ":8051");
@@ -245,16 +321,27 @@ HTML_CODE = """<!DOCTYPE html>
                 const data = JSON.parse(event.data);
                 rawDataLog.push(data);
                 document.getElementById('status').innerText = "ESTADO: " + (data.estado || "N/D");
-                
-                const t = data.tempo + "s";
-                pushData(charts.chartAlt, t, data.altitude);
-                pushData(charts.chartVel, t, data.velocidade);
-                pushData(charts.chartG, t, data.forca_g);
-                pushData(charts.chartCO2, t, data.eco2);
-                pushData(charts.chartTemp, t, data.temperatura);
-                pushData(charts.chartPress, t, data.pressao);
-                pushData(charts.chartHum, t, data.humidade);
-                pushData(charts.chartUV, t, data.uv);
+
+                const numTime = data.tempo !== undefined ? parseFloat(data.tempo) : 0;
+                const t = numTime + "s";
+
+                // Verificar mudança de estado para desenhar a linha vertical
+                if (data.estado && data.estado !== currentState) {
+                    currentState = data.estado;
+                    addPhaseLine(currentState, t, numTime);
+                }
+
+                // Inserir dados nos gráficos e atualizar KPIs
+                chartConfigs.forEach(cfg => {
+                    const chart = charts[cfg.id];
+                    const val = data[cfg.key];
+                    if (val !== undefined && val !== null) {
+                        chart.data.labels.push(t);
+                        chart.data.datasets[0].data.push(val);
+                        chart.update('none');
+                        updateKPIs(cfg.id, chart.data.datasets[0].data);
+                    }
+                });
 
                 const fields = {
                     "Pacote ID": data.id,
@@ -351,8 +438,8 @@ HTML_CODE = """<!DOCTYPE html>
             const padding = 20;
 
             const combinedCanvas = document.createElement('canvas');
-            combinedCanvas.width = (singleW * 4) + (padding * 5);
-            combinedCanvas.height = (singleH * 2) + (padding * 3);
+            combinedCanvas.width = (singleW * 2) + (padding * 3);
+            combinedCanvas.height = (singleH * 4) + (padding * 5);
             const cCtx = combinedCanvas.getContext('2d');
 
             cCtx.fillStyle = '#0f172a';
@@ -360,8 +447,8 @@ HTML_CODE = """<!DOCTYPE html>
 
             chartConfigs.forEach((cfg, index) => {
                 const srcCanvas = document.getElementById(cfg.id);
-                const col = index % 4;
-                const row = Math.floor(index / 4);
+                const col = index % 2;
+                const row = Math.floor(index / 2);
 
                 const x = padding + col * (singleW + padding);
                 const y = padding + row * (singleH + padding);
@@ -399,10 +486,19 @@ HTML_CODE = """<!DOCTYPE html>
 
         function clearDashboard() {
             rawDataLog = [];
-            Object.values(charts).forEach(chart => {
+            currentState = null;
+            lastPhaseTime = -999;
+            lastPhaseLabelTime = "";
+            chartConfigs.forEach(cfg => {
+                const chart = charts[cfg.id];
                 chart.data.labels = [];
                 chart.data.datasets[0].data = [];
+                chart.options.plugins.annotation.annotations = {};
                 chart.update('none');
+
+                document.getElementById(`min-${cfg.id}`).innerText = "-";
+                document.getElementById(`max-${cfg.id}`).innerText = "-";
+                document.getElementById(`avg-${cfg.id}`).innerText = "-";
             });
             document.getElementById('metrics').innerHTML = "";
             document.getElementById('status').innerText = "PAINEL LIMPO / AGUARDANDO NOVO VOO";
