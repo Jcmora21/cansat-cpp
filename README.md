@@ -112,8 +112,23 @@ No terminal da Ground Station, prime `Ctrl + C` para fechar os servidores. Os da
 
 * **Porta em uso (Address already in use):**
   Se o servidor não arrancar por causa de uma porta ocupada, fecha outros processos em segundo plano com:
-  fuser -k 8050/tcp 8051/tcp 5005/udp
-
+```bash
+fuser -k 8050/tcp 8051/tcp 5005/udp
+```
+* **Instalar as dependencias `pip` por vezes exige ambiente pip para instalar. use os seguintes passos sempre que quiser utilizar:
+```bash
+pkg install python python-pip
+```
+ou
+```bash
+sudo apt install python3-venv
+```
+e por fim
+```bash
+python3 -m venv pip
+source pip/bin/activate
+```
+Depois disso tente instalar outra vez as dependencias.
 ---
 
 ## 💾 Gestão dos Dados de Voo (.csv)
