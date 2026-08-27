@@ -1,0 +1,102 @@
+====================================================================
+               CANSAT GROUND STATION & SIMULATOR
+====================================================================
+
+Este projeto contem a Estacao de Solo (Ground Station) e o Simulador
+de Voo desenvolvidos em Python e C++ para monitorizacao de telemetria
+em tempo real de um projeto CanSat/Minifoguete.
+
+--------------------------------------------------------------------
+1. FUNCIONALIDADES
+--------------------------------------------------------------------
+
+- Painel Web em Tempo Real: Interface desenvolvida em HTML5/JavaScript
+  com graficos dinamicos (Chart.js) organizados em grelha responsiva.
+- Gestao Inteligente de Fases de Voo: Detecao de transicoes de estado
+  (Espera, Subida, Apogeu, Descida) com etiquetagem automatica.
+- Metricas de Voo e KPIs: Exibicao automatica dos valores Minimo,
+  Maximo e Media no topo de cada grafico.
+- Gravacao Automatica em CSV: Salvamento instantaneo dos pacotes na
+  pasta dados_voo/.
+- Exportacao de Dados: Descarga direta do historico em .csv ou
+  captura em imagem .png dos graficos.
+
+--------------------------------------------------------------------
+2. ESTRUTURA DO PROJETO
+--------------------------------------------------------------------
+
+cansat-cpp/
+├── groundstation_clean.py   # Servidor HTTP/WebSocket da Ground Station
+├── guardar.sh              # Script auxiliar para automacao
+├── entrar.sh               # Script de inicializacao Termux/Ubuntu
+├── dados_voo/              # Pasta onde sao gravados os ficheiros .csv
+└── simulador/
+    ├── simulador.cpp       # Codigo-fonte do simulador em C++
+    └── compilar.sh         # Script para compilacao do simulador
+
+--------------------------------------------------------------------
+3. REQUISITOS E DEPENDENCIAS
+--------------------------------------------------------------------
+
+No ambiente Linux/Ubuntu (via Termux/PROOT), garante as dependencias:
+
+- Python 3 (com a biblioteca websockets):
+  pip install websockets
+
+- Compilador C++ (g++):
+  apt update && apt install g++ -y
+
+- Se for necessario criar um ambiente virtual (venv):
+  [No Termux]: pkg install python python-pip
+  [No Ubuntu]: sudo apt install python3-venv
+
+  Criar e ativar o ambiente:
+  python3 -m venv .venv
+  source .venv/bin/activate
+
+--------------------------------------------------------------------
+4. COMO EXECUTAR O SISTEMA
+--------------------------------------------------------------------
+
+A Estacao de Solo deve ser SEMPRE iniciada antes do Simulador.
+
+PASSO 1: Iniciar a Estacao de Solo (Terminal 1)
+-----------------------------------------------
+Executa o comando:
+  python3 groundstation_clean.py
+
+- Servidores iniciados: UDP (5005), WebSocket (8051) e Web (8050).
+- Acede no navegador web ao endereco: http://127.0.0.1:8050
+
+PASSO 2: Compilar e Iniciar o Simulador (Terminal 2)
+----------------------------------------------------
+Abre um segundo terminal e executa:
+  cd simulador
+  ./compilar.sh
+  ./simulador
+
+- O simulador gera os dados e envia-os via UDP para a Ground Station.
+- Acompanha os graficos em tempo real no navegador.
+
+--------------------------------------------------------------------
+5. COMO PARAR A EXECUCAO
+--------------------------------------------------------------------
+
+- Parar o Simulador: No Terminal 2, prime Ctrl + C.
+- Parar a Ground Station: No Terminal 1, prime Ctrl + C.
+(Os dados do voo ficam gravados em seguranca na pasta dados_voo/).
+
+--------------------------------------------------------------------
+6. RESOLUCAO DE PROBLEMAS
+--------------------------------------------------------------------
+
+- Porta em uso (Address already in use):
+  Se o servidor nao arrancar por porta ocupada, executa:
+  fuser -k 8050/tcp 8051/tcp 5005/udp
+
+--------------------------------------------------------------------
+7. GESTAO DOS DADOS DE VOO (.CSV)
+--------------------------------------------------------------------
+
+- Ficheiros gerados no formato: voo_cansat_AAAA-MM-DD_HH-MM-SS.csv
+- Pasta de destino: ~/cansat-cpp/dados_voo/
