@@ -48,7 +48,6 @@ def udp_receiver():
             latest_packet = payload
             flight_history.append(payload)
             
-            # Enviar em tempo real para todos os clientes conectados via WebSocket
             if CONNECTED_CLIENTS:
                 asyncio.run_coroutine_threadsafe(broadcast(payload), loop)
 
@@ -64,16 +63,14 @@ async def broadcast(message):
     if CONNECTED_CLIENTS:
         await asyncio.gather(*(client.send(message) for client in CONNECTED_CLIENTS), return_exceptions=True)
 
-# --- WEBSOCKET SERVER (Sempre atento e responsivo) ---
+# --- WEBSOCKET SERVER ---
 async def ws_handler(websocket):
     global flight_history, latest_packet
     CONNECTED_CLIENTS.add(websocket)
     try:
-        # 1. Enviar histórico anterior para o cliente que acabou de se ligar
         for past_packet in flight_history:
             await websocket.send(past_packet)
             
-        # 2. Manter a conexão viva e escutar comandos (como o limpar dados) em paralelo
         async for message in websocket:
             try:
                 data = json.loads(message)
@@ -104,6 +101,8 @@ HTML_CODE = """<!DOCTYPE html>
         .btn { border: none; padding: 8px 14px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 0.85em; }
         .btn-export { background: #0284c7; color: white; }
         .btn-export:hover { background: #0369a1; }
+        .btn-img { background: #8b5cf6; color: white; }
+        .btn-img:hover { background: #7c3aed; }
         .btn-clear { background: #ef4444; color: white; }
         .btn-clear:hover { background: #dc2626; }
         .btn-cancel { background: #64748b; color: white; }
@@ -132,6 +131,7 @@ HTML_CODE = """<!DOCTYPE html>
         <h2 style="margin:0; font-size: 1.2em;">📡 CANSAT GROUND STATION</h2>
         <div class="actions">
             <button class="btn btn-export" onclick="downloadCSV()">📥 Exportar CSV</button>
+            <button class="btn btn-img" onclick="downloadChartsAsImages()">📸 Baixar Gráficos (PNG)</button>
             <button class="btn btn-clear" onclick="openClearModal()">🗑️ Limpar Dados</button>
             <div id="status" class="status">AGUARDANDO DADOS...</div>
         </div>
@@ -147,8 +147,6 @@ HTML_CODE = """<!DOCTYPE html>
             <div class="card"><canvas id="chartPress"></canvas></div>
             <div class="card"><canvas id="chartHum"></canvas></div>
             <div class="card"><canvas id="chartUV"></canvas></div>
-            <div class="card"><canvas id="chartLux"></canvas></div>
-            <div class="card"><canvas id="chartTVOC"></canvas></div>
         </div>
 
         <div class="card">
@@ -186,23 +184,49 @@ HTML_CODE = """<!DOCTYPE html>
                 options: {
                     responsive: true,
                     animation: false,
-                    scales: { x: { display: false }, y: { ticks: { color: '#94a3b8' } } }
+                    scales: { 
+                        x: { 
+                            display: true,
+                            grid: { color: '#334155' },
+                            ticks: { 
+                                color: '#94a3b8',
+                                font: { size: 10 },
+                                autoSkip: true,
+                                maxTicksLimit: 10,     // Limita estritamente a 10 valores no eixo X
+                                maxRotation: 0,        // Força o texto na horizontal sem rotação
+                                minRotation: 0,
+                                callback: function(value) {
+                                    const rawLabel = this.getLabelForValue(value);
+                                    if (!rawLabel) return '';
+                                    const num = Math.round(parseFloat(rawLabel.toString().replace('s', '')));
+                                    return isNaN(num) ? rawLabel : num + 's';
+                                }
+                            }
+                        }, 
+                        y: { 
+                            grid: { color: '#334155' },
+                            ticks: { color: '#94a3b8' } 
+                        } 
+                    }
                 }
             });
         }
 
-        const charts = {
-            cAlt: makeChart('chartAlt', 'Altitude (m)', '#38bdf8'),
-            cVel: makeChart('chartVel', 'Velocidade (m/s)', '#fbbf24'),
-            cG: makeChart('chartG', 'Força-G (g)', '#f43f5e'),
-            cCO2: makeChart('chartCO2', 'eCO2 (ppm)', '#34d399'),
-            cTemp: makeChart('chartTemp', 'Temperatura (°C)', '#ec4899'),
-            cPress: makeChart('chartPress', 'Pressão (hPa)', '#8b5cf6'),
-            cHum: makeChart('chartHum', 'Humidade (%)', '#06b6d4'),
-            cUV: makeChart('chartUV', 'Índice UV', '#eab308'),
-            cLux: makeChart('chartLux', 'Luminosidade (lx)', '#f97316'),
-            cTVOC: makeChart('chartTVOC', 'TVOC (ppb)', '#10b981')
-        };
+        const chartConfigs = [
+            { id: 'chartAlt', label: 'Altitude (m)', color: '#38bdf8' },
+            { id: 'chartVel', label: 'Velocidade (m/s)', color: '#fbbf24' },
+            { id: 'chartG', label: 'Força-G (g)', color: '#f43f5e' },
+            { id: 'chartCO2', label: 'eCO2 (ppm)', color: '#34d399' },
+            { id: 'chartTemp', label: 'Temperatura (°C)', color: '#ec4899' },
+            { id: 'chartPress', label: 'Pressão (hPa)', color: '#8b5cf6' },
+            { id: 'chartHum', label: 'Humidade (%)', color: '#06b6d4' },
+            { id: 'chartUV', label: 'Índice UV', color: '#eab308' }
+        ];
+
+        const charts = {};
+        chartConfigs.forEach(cfg => {
+            charts[cfg.id] = makeChart(cfg.id, cfg.label, cfg.color);
+        });
 
         function pushData(chart, label, val) {
             chart.data.labels.push(label);
@@ -223,16 +247,14 @@ HTML_CODE = """<!DOCTYPE html>
                 document.getElementById('status').innerText = "ESTADO: " + (data.estado || "N/D");
                 
                 const t = data.tempo + "s";
-                pushData(charts.cAlt, t, data.altitude);
-                pushData(charts.cVel, t, data.velocidade);
-                pushData(charts.cG, t, data.forca_g);
-                pushData(charts.cCO2, t, data.eco2);
-                pushData(charts.cTemp, t, data.temperatura);
-                pushData(charts.cPress, t, data.pressao);
-                pushData(charts.cHum, t, data.humidade);
-                pushData(charts.cUV, t, data.uv);
-                pushData(charts.cLux, t, data.lux);
-                pushData(charts.cTVOC, t, data.tvoc);
+                pushData(charts.chartAlt, t, data.altitude);
+                pushData(charts.chartVel, t, data.velocidade);
+                pushData(charts.chartG, t, data.forca_g);
+                pushData(charts.chartCO2, t, data.eco2);
+                pushData(charts.chartTemp, t, data.temperatura);
+                pushData(charts.chartPress, t, data.pressao);
+                pushData(charts.chartHum, t, data.humidade);
+                pushData(charts.chartUV, t, data.uv);
 
                 const fields = {
                     "Pacote ID": data.id,
@@ -294,6 +316,67 @@ HTML_CODE = """<!DOCTYPE html>
             a.click();
         }
 
+        async function downloadChartsAsImages() {
+            if (rawDataLog.length === 0) {
+                alert("Não existem dados para gerar imagens dos gráficos.");
+                return;
+            }
+
+            const now = new Date();
+            const timestamp = now.toISOString().replace('T', '_').replace(/:/g, '-').slice(0, 19);
+
+            for (let i = 0; i < chartConfigs.length; i++) {
+                const cfg = chartConfigs[i];
+                const canvas = document.getElementById(cfg.id);
+                
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = canvas.width;
+                tempCanvas.height = canvas.height;
+                const ctx = tempCanvas.getContext('2d');
+                ctx.fillStyle = '#1e293b';
+                ctx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+                ctx.drawImage(canvas, 0, 0);
+
+                const link = document.createElement('a');
+                link.download = `grafico_${i + 1}_${cfg.id}_${timestamp}.png`;
+                link.href = tempCanvas.toDataURL('image/png');
+                link.click();
+
+                await new Promise(r => setTimeout(r, 200));
+            }
+
+            const firstCanvas = document.getElementById(chartConfigs[0].id);
+            const singleW = firstCanvas.width;
+            const singleH = firstCanvas.height;
+            const padding = 20;
+
+            const combinedCanvas = document.createElement('canvas');
+            combinedCanvas.width = (singleW * 4) + (padding * 5);
+            combinedCanvas.height = (singleH * 2) + (padding * 3);
+            const cCtx = combinedCanvas.getContext('2d');
+
+            cCtx.fillStyle = '#0f172a';
+            cCtx.fillRect(0, 0, combinedCanvas.width, combinedCanvas.height);
+
+            chartConfigs.forEach((cfg, index) => {
+                const srcCanvas = document.getElementById(cfg.id);
+                const col = index % 4;
+                const row = Math.floor(index / 4);
+
+                const x = padding + col * (singleW + padding);
+                const y = padding + row * (singleH + padding);
+
+                cCtx.fillStyle = '#1e293b';
+                cCtx.fillRect(x, y, singleW, singleH);
+                cCtx.drawImage(srcCanvas, x, y);
+            });
+
+            const combinedLink = document.createElement('a');
+            combinedLink.download = `graficos_todos_combinados_${timestamp}.png`;
+            combinedLink.href = combinedCanvas.toDataURL('image/png');
+            combinedLink.click();
+        }
+
         function openClearModal() {
             if (rawDataLog.length === 0) {
                 alert("O painel já se encontra sem dados.");
@@ -324,7 +407,6 @@ HTML_CODE = """<!DOCTYPE html>
             document.getElementById('metrics').innerHTML = "";
             document.getElementById('status').innerText = "PAINEL LIMPO / AGUARDANDO NOVO VOO";
 
-            // 🗑️ Avisa o servidor Python para limpar o histórico
             if (ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ action: "clear" }));
             }
