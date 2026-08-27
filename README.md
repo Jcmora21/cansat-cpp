@@ -115,7 +115,8 @@ No terminal da Ground Station, prime `Ctrl + C` para fechar os servidores. Os da
 ```bash
 fuser -k 8050/tcp 8051/tcp 5005/udp
 ```
-* **Instalar as dependencias `pip` por vezes exige ambiente pip para instalar. use os seguintes passos sempre que quiser utilizar:
+* **Instalar as dependencias `pip` por vezes exige ambiente pip para instalar. use os seguintes passos sempre que quiser utilizar:**
+
 ```bash
 pkg install python python-pip
 ```
@@ -128,7 +129,6 @@ e por fim
 python3 -m venv pip
 source pip/bin/activate
 ```
-Depois disso tente instalar outra vez as dependencias.
 ---
 
 ## 💾 Gestão dos Dados de Voo (.csv)
