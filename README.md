@@ -32,9 +32,11 @@ cansat-cpp/
 No ambiente Linux/Ubuntu (via Termux/PROOT), garante que tens instaladas as seguintes dependências:
 
 * **Python 3** (com a biblioteca `websockets`):
-  pip install websockets
+```bash
+  pip install websockets```
 * **Compilador C++ (g++)**:
-  apt update && apt install g++ -y
+```bash
+  apt update && apt install g++ -y```
 
 ---
 
@@ -44,8 +46,8 @@ Para que a telemetria funcione corretamente, **a Estação de Solo deve ser semp
 
 ### 1. Iniciar a Estação de Solo (Ground Station)
 Abre o terminal e executa o servidor da estação de solo:
-
-python3 groundstation_clean.py
+```bash
+python3 groundstation_clean.py```
 
 * **O que acontece:** O servidor UDP (porta 5005), o servidor WebSocket (porta 8051) e o servidor Web HTTP (porta 8050) são iniciados.
 * **Aceder à Interface:** Abre o navegador Web do teu dispositivo e acede ao endereço:
@@ -56,9 +58,10 @@ python3 groundstation_clean.py
 ### 2. Compilar e Iniciar o Simulador de Voo
 Abre um **segundo terminal** (mantendo a Ground Station a correr no primeiro) e entra na pasta do simulador:
 
+```bash
 cd simulador
 ./compilar.sh
-./simulador
+./simulador```
 
 * **O que acontece:** O simulador começa a gerar dados físicos de voo (altitude, velocidade, aceleração, pressão, sensores ambientais) e a enviá-los via UDP para a estação de solo.
 * **Visualização:** Acompanha os gráficos a serem desenhados em tempo real na página web.
