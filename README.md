@@ -34,12 +34,12 @@ No ambiente Linux/Ubuntu (via Termux/PROOT), garante que tens instaladas as segu
 * **Python 3** (com a biblioteca `websockets`):
 
 ```bash
-  pip install websockets
+pip install websockets```
 
 * **Compilador C++ (g++)**:
 
 ```bash
-  apt update && apt install g++ -y
+apt update && apt install g++ -y```
 
 ---
 
