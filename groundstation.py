@@ -1,3 +1,4 @@
+import time
 import asyncio
 import socket
 import json
@@ -16,6 +17,9 @@ csv_filename = os.path.join(LOG_DIR, f"voo_cansat_{session_time}.csv")
 
 latest_packet = None
 flight_history = []
+
+cansats = {}
+
 CONNECTED_CLIENTS = set()
 
 csv_headers = [
@@ -35,7 +39,7 @@ print(f"💾 [Logger] Gravação automática de dados ativa em: {csv_filename}")
 
 # --- THREAD UDP ---
 def udp_receiver():
-    global latest_packet, flight_history
+    global latest_packet, flight_history, cansats
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -123,6 +127,30 @@ def udp_receiver():
             # -------------------------------------------------
             # Guardar último pacote e histórico
             # -------------------------------------------------
+            cansat_id = parsed.get("cansat_id")
+
+            if cansat_id is not None:
+                if cansat_id not in cansats:
+                    cansats[cansat_id] = {
+                        "latest": None,
+                        "history": [],
+                        "last_received": time.time(),
+                        "status": "ONLINE"
+                    }
+
+                if cansats[cansat_id]["status"] == "OFFLINE":
+                    print(f"🟢 CanSat {cansat_id} ONLINE")
+
+                cansats[cansat_id]["latest"] = normalized_payload
+                cansats[cansat_id]["history"].append(normalized_payload)
+                cansats[cansat_id]["last_received"] = time.time()
+                cansats[cansat_id]["status"] = "ONLINE"
+
+                print(
+                    f"📡 CanSat {cansat_id} recebido "
+                    f"(seq={parsed.get('sequence', 0)})"
+                )
+
             latest_packet = normalized_payload
             flight_history.append(normalized_payload)
 
@@ -151,6 +179,24 @@ def udp_receiver():
 
         except Exception as e:
             print(f"⚠️ [UDP Receiver] Erro: {e}")
+
+def check_cansat_status():
+    while True:
+        try:
+            agora = time.time()
+
+            for cansat_id, cansat in cansats.items():
+                if agora - cansat["last_received"] >= 2.0:
+                    if cansat["status"] != "OFFLINE":
+                        cansat["status"] = "OFFLINE"
+                        print(f"🔴 CanSat {cansat_id} OFFLINE")
+
+            time.sleep(0.5)
+
+        except Exception as e:
+            print(f"⚠️ [Status] Erro: {e}")
+
+
 async def broadcast(message):
     if CONNECTED_CLIENTS:
         await asyncio.gather(*(client.send(message) for client in CONNECTED_CLIENTS), return_exceptions=True)
@@ -1530,6 +1576,7 @@ async def main():
     loop = asyncio.get_running_loop()
     
     threading.Thread(target=udp_receiver, daemon=True).start()
+    threading.Thread(target=check_cansat_status, daemon=True).start()
     threading.Thread(target=run_http_server, daemon=True).start()
     
     print("🚀 [WebSocket Server] Ativo na porta 8051...")
