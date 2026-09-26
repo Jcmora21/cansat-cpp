@@ -135,12 +135,32 @@ def udp_receiver():
                         "latest": None,
                         "history": [],
                         "last_received": time.time(),
-                        "status": "ONLINE"
+                        "status": "ONLINE",
+                        "last_sequence": None,
+                        "lost_packets": 0
                     }
 
                 if cansats[cansat_id]["status"] == "OFFLINE":
                     print(f"🟢 CanSat {cansat_id} ONLINE")
 
+                current_sequence = parsed.get("sequence")
+
+                if current_sequence is not None:
+                    last_sequence = cansats[cansat_id]["last_sequence"]
+
+                    if last_sequence is not None:
+                        if current_sequence > last_sequence + 1:
+                            lost = current_sequence - last_sequence - 1
+                            cansats[cansat_id]["lost_packets"] += lost
+
+                            print(
+                                f"⚠️ CanSat {cansat_id}: "
+                                f"{lost} pacote(s) perdido(s) "
+                                f"(seq {last_sequence} → {current_sequence})"
+                            )
+
+                    cansats[cansat_id]["last_sequence"] = current_sequence
+                
                 cansats[cansat_id]["latest"] = normalized_payload
                 cansats[cansat_id]["history"].append(normalized_payload)
                 cansats[cansat_id]["last_received"] = time.time()
