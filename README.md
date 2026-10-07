@@ -17,7 +17,8 @@ Este repositório contém a **Estação de Solo (Ground Station)** e o **Simulad
 ## 📁 Estrutura do Projeto
 
 cansat-cpp/
-├── groundstation_clean.py   # Servidor HTTP/WebSocket da Estação de Solo em Python
+├── groundstation.py         # Ground Station para testes UDP
+├── groundstation_serial.py  # Ground Station via serial/APC220
 ├── guardar.sh              # Script auxiliar para automação
 ├── entrar.sh               # Script de inicialização da ponte Termux/Ubuntu
 ├── dados_voo/              # Pasta onde são gravados os ficheiros de telemetria .csv
@@ -31,10 +32,10 @@ cansat-cpp/
 
 No ambiente Linux/Ubuntu (via Termux/PROOT), garante que tens instaladas as seguintes dependências:
 
-* **Python 3** (com a biblioteca `websockets`):
+* **Python 3** (com `websockets` e `pyserial`):
 
 ```bash
-pip install websockets
+pip install websockets pyserial
 ```
 
 * **Compilador C++ (g++)**:
@@ -51,7 +52,7 @@ Para que a telemetria funcione corretamente, **a Estação de Solo deve ser semp
 ### 1. Iniciar a Estação de Solo (Ground Station)
 Abre o terminal e executa o servidor da estação de solo:
 ```bash
-python3 groundstation_clean.py
+python3 groundstation.py
 ```
 * **O que acontece:** O servidor UDP (porta 5005), o servidor WebSocket (porta 8051) e o servidor Web HTTP (porta 8050) são iniciados.
 * **Aceder à Interface:** Abre o navegador Web do teu dispositivo e acede ao endereço:
@@ -69,6 +70,19 @@ cd simulador
 * **O que acontece:** O simulador começa a gerar dados físicos de voo (altitude, velocidade, aceleração, pressão, sensores ambientais) e a enviá-los via UDP para a estação de solo.
 * **Visualização:** Acompanha os gráficos a serem desenhados em tempo real na página web.
 
+### Ground Station com APC220
+
+Liga o APC220 do PC a uma porta USB-serial e inicia a variante serial:
+
+```bash
+python3 groundstation_serial.py --port /dev/ttyUSB0 --baudrate 9600
+```
+
+Substitui a porta e o baudrate pelos valores do adaptador e dos dois módulos
+APC220. A telemetria, os ACKs e os comandos têm de ser enviados como um objeto
+JSON por linha, terminado em newline (`\n`). A interface Web continua em
+`http://127.0.0.1:8050` e usa o mesmo protocolo CANSAT-TLM.
+
 ---
 
 ## 📖 Guia Prático de Utilização
@@ -78,7 +92,7 @@ cd simulador
 1. **Abrir dois terminais** (ou duas abas do Termux/Ubuntu).
 2. **No Terminal 1:** Arranca a Ground Station
 ```bash
-python3 groundstation_clean.py
+python3 groundstation.py
 ```
 4. **No Navegador:** Abre a página `http://127.0.0.1:8050`. Vais ver os painéis a zeros, à espera de pacotes.
 5. **No Terminal 2:** Vai à pasta `simulador` e compila e executa `./simulador`.

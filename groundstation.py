@@ -6,6 +6,9 @@ import websockets
 import threading
 import csv
 import os
+import math
+import re
+import zlib
 from datetime import datetime
 
 # 📁 Criar pasta para logs
@@ -21,48 +24,375 @@ flight_history = []
 cansats = {}
 
 CONNECTED_CLIENTS = set()
+transport = None
+peer_addresses = {}
+cansats_lock = threading.RLock()
 
 csv_headers = [
-    "id", "tempo", "estado", "altitude", "velocidade", "forca_g", "aceleracao",
-    "temperatura", "humidade", "pressao", "eco2", "tvoc", "uv", "lux",
-    "paraquedas", "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z",
-    "pitch", "roll", "yaw", "rssi", "snr"
+    "id",
+    "tempo",
+    "estado",
+    "altitude",
+    "velocidade",
+    "aceleracao",
+    "temperatura",
+    "humidade",
+    "pressao",
+    "eco2",
+    "tvoc",
+    "uv",
+    "lux",
+    "paraquedas",
+    "acc_x",
+    "acc_y",
+    "acc_z",
+    "gyro_x",
+    "gyro_y",
+    "gyro_z",
+    "pitch",
+    "roll",
+    "yaw",
+    "rssi",
+    "snr",
 ]
 
+
 def init_csv(filename):
-    with open(filename, mode='w', newline='', encoding='utf-8') as f:
+    with open(filename, mode="w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(csv_headers)
+
 
 init_csv(csv_filename)
 print(f"💾 [Logger] Gravação automática de dados ativa em: {csv_filename}")
 
-# --- THREAD UDP ---
-def udp_receiver():
-    global latest_packet, flight_history, cansats
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", 5005))
+REQUIRED_TOP_LEVEL_FIELDS = [
+    "protocol",
+    "version",
+    "type",
+    "cansat_id",
+    "sequence",
+    "mission_time_ms",
+    "state",
+    "data",
+    "link",
+]
 
-    print("📡 [UDP Receiver] Escutando na porta 5005...")
+REQUIRED_DATA_FIELDS = [
+    "altitude",
+    "velocity",
+    "acceleration",
+    "force_g",
+    "temperature",
+    "humidity",
+    "pressure",
+    "eco2",
+    "tvoc",
+    "uv",
+    "lux",
+    "acc_x",
+    "acc_y",
+    "acc_z",
+    "gyro_x",
+    "gyro_y",
+    "gyro_z",
+    "pitch",
+    "roll",
+    "yaw",
+    "parachute",
+]
+
+REQUIRED_LINK_FIELDS = ["rssi", "snr"]
+
+def calculate_crc32(payload):
+    return format(zlib.crc32(payload.encode("utf-8")) & 0xFFFFFFFF, "08X")
+
+
+def protect_control_message(message):
+    protected = message.copy()
+    protected.pop("crc", None)
+    checksum_payload = json.dumps(
+        protected, separators=(",", ":"), sort_keys=True
+    )
+    protected["crc"] = calculate_crc32(checksum_payload)
+    return protected
+
+
+def validate_telemetry_packet(packet):
+    if not isinstance(packet, dict):
+        return False, ["packet"]
+
+    missing = []
+
+    for field in REQUIRED_TOP_LEVEL_FIELDS:
+        if field not in packet:
+            missing.append(field)
+
+    data = packet.get("data")
+
+    if isinstance(data, dict):
+        for field in REQUIRED_DATA_FIELDS:
+            if field not in data:
+                missing.append(f"data.{field}")
+    else:
+        missing.append("data")
+
+    link = packet.get("link")
+
+    if isinstance(link, dict):
+        for field in REQUIRED_LINK_FIELDS:
+            if field not in link:
+                missing.append(f"link.{field}")
+    else:
+        missing.append("link")
+
+    if missing:
+        return False, missing
+
+    if packet.get("protocol") != "CANSAT-TLM":
+        return False, ["protocol"]
+    if type(packet.get("version")) is not int or packet["version"] != 1:
+        return False, ["version"]
+    if packet.get("type") != "telemetry":
+        return False, ["type"]
+    for field in ("cansat_id", "sequence", "mission_time_ms"):
+        if type(packet.get(field)) is not int or packet[field] < 0:
+            return False, [field]
+    if not isinstance(packet.get("state"), str):
+        return False, ["state"]
+
+    for field in REQUIRED_DATA_FIELDS:
+        value = data[field]
+        if field == "parachute":
+            if type(value) is not bool:
+                return False, [f"data.{field}"]
+        elif type(value) not in (int, float) or (
+            type(value) is float and not math.isfinite(value)
+        ):
+            return False, [f"data.{field}"]
+
+    for field in REQUIRED_LINK_FIELDS:
+        value = link[field]
+        if type(value) not in (int, float) or (
+            type(value) is float and not math.isfinite(value)
+        ):
+            return False, [f"link.{field}"]
+
+    return True, []
+
+
+def verify_packet_crc(packet):
+    crc_received = packet.get("crc")
+    if not isinstance(crc_received, str) or not re.fullmatch(r"[0-9A-Fa-f]{1,8}", crc_received):
+        return False
+
+    packet_without_crc = packet.copy()
+    packet_without_crc.pop("crc", None)
+    crc_payload = json.dumps(packet_without_crc, separators=(",", ":"), sort_keys=True)
+    return crc_received.upper().zfill(8) == calculate_crc32(crc_payload)
+
+
+def new_cansat_state():
+    return {
+        "latest": None,
+        "history": [],
+        "last_received": time.time(),
+        "status": "ONLINE",
+        "last_sequence": None,
+        "seen_sequences": set(),
+        "lost_sequences": set(),
+        "incomplete_sequences": set(),
+        "lost_packets": 0,
+        "incomplete_packets": 0,
+        "invalid_crc_packets": 0,
+        "duplicate_packets": 0,
+        "received_packets": 0,
+    }
+
+
+def get_cansat_state(cansat_id):
+    with cansats_lock:
+        if cansat_id not in cansats:
+            cansats[cansat_id] = new_cansat_state()
+        return cansats[cansat_id]
+
+
+def classify_sequence(cansat, sequence):
+    if sequence in cansat["seen_sequences"]:
+        cansat["duplicate_packets"] += 1
+        return "duplicate", []
+
+    if sequence in cansat["lost_sequences"]:
+        cansat["lost_sequences"].remove(sequence)
+        cansat["lost_packets"] -= 1
+
+    cansat["incomplete_sequences"].discard(sequence)
+    last_sequence = cansat["last_sequence"]
+    newly_lost = []
+
+    if last_sequence is not None and sequence > last_sequence + 1:
+        for missing_sequence in range(last_sequence + 1, sequence):
+            if (
+                missing_sequence not in cansat["seen_sequences"]
+                and missing_sequence not in cansat["incomplete_sequences"]
+                and missing_sequence not in cansat["lost_sequences"]
+            ):
+                cansat["lost_sequences"].add(missing_sequence)
+                newly_lost.append(missing_sequence)
+
+    if newly_lost:
+        cansat["lost_packets"] += len(newly_lost)
+
+    cansat["seen_sequences"].add(sequence)
+    if last_sequence is None or sequence > last_sequence:
+        cansat["last_sequence"] = sequence
+    cansat["received_packets"] += 1
+    return "received", newly_lost
+
+
+def record_incomplete_packet(cansat, sequence):
+    cansat["incomplete_packets"] += 1
+    if sequence is not None:
+        if sequence in cansat["lost_sequences"]:
+            cansat["lost_sequences"].remove(sequence)
+            cansat["lost_packets"] -= 1
+        cansat["incomplete_sequences"].add(sequence)
+
+
+def get_packet_counts(cansat):
+    return {
+        "received": cansat["received_packets"],
+        "lost": cansat["lost_packets"],
+        "duplicate": cansat["duplicate_packets"],
+        "incomplete": cansat["incomplete_packets"],
+        "crc_invalid": cansat["invalid_crc_packets"],
+    }
+
+
+class UDPTransport:
+    """Adaptador de transporte; o protocolo nao depende do radio utilizado."""
+
+    def __init__(self, host, port):
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.bind((host, port))
+
+    def receive(self):
+        return self.socket.recvfrom(4096)
+
+    def send(self, payload, address):
+        self.socket.sendto(payload.encode("utf-8"), address)
+
+
+def send_ack(cansat_id, sequence, address):
+    if transport is None:
+        return
+    ack = protect_control_message(
+        {"type": "ack", "cansat_id": cansat_id, "sequence": sequence}
+    )
+    transport.send(json.dumps(ack, separators=(",", ":")), address)
+
+
+def emit_event(event):
+    if CONNECTED_CLIENTS:
+        asyncio.run_coroutine_threadsafe(broadcast(json.dumps(event)), loop)
+
+
+def handle_command(message):
+    cansat_id = message.get("cansat_id")
+    command = message.get("command")
+    if type(cansat_id) is not int or not isinstance(command, str) or not command:
+        return {"type": "command_status", "status": "error", "reason": "invalid_command"}
+
+    address = peer_addresses.get(cansat_id)
+    if transport is None or address is None:
+        return {"type": "command_status", "cansat_id": cansat_id, "status": "error", "reason": "cansat_unavailable"}
+
+    command_payload = protect_control_message({
+        "type": "command",
+        "cansat_id": cansat_id,
+        "command": command,
+    })
+    try:
+        transport.send(json.dumps(command_payload, separators=(",", ":")), address)
+    except OSError:
+        return {"type": "command_status", "cansat_id": cansat_id, "status": "error", "reason": "transport_error"}
+    return {"type": "command_status", "cansat_id": cansat_id, "status": "sent"}
+
+
+# --- RECEIVER DO TRANSPORTE ---
+def transport_receiver(transport_factory=UDPTransport):
+    global latest_packet, flight_history, transport
+
+    transport = transport_factory("127.0.0.1", 5005)
+
+    print("[Receiver] A escutar telemetria pelo transporte configurado...")
 
     while True:
         try:
-            data, _ = sock.recvfrom(4096)
+            data, address = transport.receive()
             payload = data.decode("utf-8")
-
-            # -------------------------------------------------
-            # Recebe o novo protocolo CANSAT-TLM v1
-            # -------------------------------------------------
             packet = json.loads(payload)
+            if not isinstance(packet, dict):
+                print("Pacote ignorado: JSON nao e um objeto")
+                continue
 
-            # Verificar se é um pacote CANSAT-TLM
-            if (
-                packet.get("protocol") == "CANSAT-TLM"
-                and packet.get("version") == 1
-                and packet.get("type") == "telemetry"
-            ):
+            if packet.get("type") == "command_ack":
+                if verify_packet_crc(packet):
+                    print(
+                        f"Resposta de comando recebida (CanSat "
+                        f"{packet.get('cansat_id', '?')}, "
+                        f"status={packet.get('status', '?')})"
+                    )
+                else:
+                    print("Resposta de comando descartada: CRC invalido")
+                continue
+
+            is_protocol_packet = packet.get("protocol") == "CANSAT-TLM"
+            if is_protocol_packet:
+                if packet.get("version") != 1 or packet.get("type") != "telemetry":
+                    continue
+
+                if not verify_packet_crc(packet):
+                    cansat_id = packet.get("cansat_id")
+                    if type(cansat_id) is int and cansat_id >= 0:
+                        cansat = get_cansat_state(cansat_id)
+                        cansat["invalid_crc_packets"] += 1
+                        emit_event({
+                            "type": "packet_status",
+                            "packet_status": "crc_invalid",
+                            "cansat_id": cansat_id,
+                            "sequence": packet.get("sequence"),
+                            "packet_counts": get_packet_counts(cansat),
+                        })
+                    print(
+                        f"CRC invalido (CanSat {cansat_id}, "
+                        f"seq {packet.get('sequence', '?')})"
+                    )
+                    continue
+
+                valid, missing_fields = validate_telemetry_packet(packet)
+                if not valid:
+                    cansat_id = packet.get("cansat_id")
+                    sequence = packet.get("sequence")
+                    if type(cansat_id) is int and cansat_id >= 0:
+                        cansat = get_cansat_state(cansat_id)
+                        sequence = sequence if type(sequence) is int and sequence >= 0 else None
+                        record_incomplete_packet(cansat, sequence)
+                        emit_event({
+                            "type": "packet_status",
+                            "packet_status": "incomplete",
+                            "cansat_id": cansat_id,
+                            "sequence": sequence,
+                            "packet_counts": get_packet_counts(cansat),
+                        })
+                    print(
+                        f"Pacote incompleto (CanSat {cansat_id}, "
+                        f"seq {sequence}): {', '.join(missing_fields)}"
+                    )
+                    continue
+
                 cansat_id = packet.get("cansat_id", 0)
                 sequence = packet.get("sequence", 0)
                 mission_time_ms = packet.get("mission_time_ms", 0)
@@ -80,136 +410,150 @@ def udp_receiver():
                     "cansat_id": cansat_id,
                     "sequence": sequence,
                     "mission_time_ms": mission_time_ms,
-
                     "tempo": mission_time_ms / 1000.0,
                     "estado": state,
-
                     "altitude": data_block.get("altitude"),
                     "velocidade": data_block.get("velocity"),
                     "aceleracao": data_block.get("acceleration"),
                     "forca_g": data_block.get("force_g"),
-
                     "temperatura": data_block.get("temperature"),
                     "humidade": data_block.get("humidity"),
                     "pressao": data_block.get("pressure"),
-
                     "eco2": data_block.get("eco2"),
                     "tvoc": data_block.get("tvoc"),
                     "uv": data_block.get("uv"),
                     "lux": data_block.get("lux"),
-
                     "acc_x": data_block.get("acc_x"),
                     "acc_y": data_block.get("acc_y"),
                     "acc_z": data_block.get("acc_z"),
-
                     "gyro_x": data_block.get("gyro_x"),
                     "gyro_y": data_block.get("gyro_y"),
                     "gyro_z": data_block.get("gyro_z"),
-
                     "pitch": data_block.get("pitch"),
                     "roll": data_block.get("roll"),
                     "yaw": data_block.get("yaw"),
-
                     "paraquedas": data_block.get("parachute", False),
-
                     "rssi": link_block.get("rssi"),
-                    "snr": link_block.get("snr")
+                    "snr": link_block.get("snr"),
                 }
 
-                # Enviar para a interface WebSocket
                 normalized_payload = json.dumps(parsed)
-
             else:
-                # Compatibilidade com o protocolo antigo
                 parsed = packet
                 normalized_payload = payload
 
-            # -------------------------------------------------
-            # Guardar último pacote e histórico
-            # -------------------------------------------------
             cansat_id = parsed.get("cansat_id")
 
             if cansat_id is not None:
-                if cansat_id not in cansats:
-                    cansats[cansat_id] = {
-                        "latest": None,
-                        "history": [],
-                        "last_received": time.time(),
-                        "status": "ONLINE",
-                        "last_sequence": None,
-                        "lost_packets": 0
-                    }
+                peer_addresses[cansat_id] = address
+                cansat = get_cansat_state(cansat_id)
+                was_offline = cansat["status"] == "OFFLINE"
+                cansat["last_received"] = time.time()
+                cansat["status"] = "ONLINE"
 
-                if cansats[cansat_id]["status"] == "OFFLINE":
-                    print(f"🟢 CanSat {cansat_id} ONLINE")
+                if was_offline:
+                    print(
+                        f"CanSat {cansat_id} ONLINE novamente "
+                        f"(seq={parsed.get('sequence', '?')})"
+                    )
+                    online_event = {
+                        "type": "cansat_status",
+                        "cansat_id": cansat_id,
+                        "status": "ONLINE",
+                        "sequence": parsed.get("sequence"),
+                        "mission_time_ms": parsed.get("mission_time_ms"),
+                        "lost_packets": cansat["lost_packets"],
+                        "packet_counts": get_packet_counts(cansat),
+                    }
+                    emit_event(online_event)
 
                 current_sequence = parsed.get("sequence")
+                if type(current_sequence) is int and current_sequence >= 0:
+                    if is_protocol_packet:
+                        send_ack(cansat_id, current_sequence, address)
+                    packet_status, newly_lost = classify_sequence(cansat, current_sequence)
 
-                if current_sequence is not None:
-                    last_sequence = cansats[cansat_id]["last_sequence"]
+                    if packet_status == "duplicate":
+                        if is_protocol_packet:
+                            emit_event({
+                                "type": "packet_status",
+                                "packet_status": "duplicate",
+                                "cansat_id": cansat_id,
+                                "sequence": current_sequence,
+                                "packet_counts": get_packet_counts(cansat),
+                            })
+                        continue
 
-                    if last_sequence is not None:
-                        if current_sequence > last_sequence + 1:
-                            lost = current_sequence - last_sequence - 1
-                            cansats[cansat_id]["lost_packets"] += lost
+                    for lost_sequence in newly_lost:
+                        emit_event({
+                            "type": "packet_status",
+                            "packet_status": "lost",
+                            "cansat_id": cansat_id,
+                            "sequence": lost_sequence,
+                            "lost_packets": cansat["lost_packets"],
+                            "packet_counts": get_packet_counts(cansat),
+                        })
 
-                            print(
-                                f"⚠️ CanSat {cansat_id}: "
-                                f"{lost} pacote(s) perdido(s) "
-                                f"(seq {last_sequence} → {current_sequence})"
-                            )
+                    parsed["packet_status"] = "received"
 
-                    cansats[cansat_id]["last_sequence"] = current_sequence
-                
-                cansats[cansat_id]["latest"] = normalized_payload
-                cansats[cansat_id]["history"].append(normalized_payload)
-                cansats[cansat_id]["last_received"] = time.time()
-                cansats[cansat_id]["status"] = "ONLINE"
+                cansat["latest"] = normalized_payload
+                cansat["history"].append(normalized_payload)
 
-                print(
-                    f"📡 CanSat {cansat_id} recebido "
-                    f"(seq={parsed.get('sequence', 0)})"
-                )
+                if is_protocol_packet:
+                    normalized_payload = json.dumps(parsed)
+                    cansat["latest"] = normalized_payload
+                    cansat["history"][-1] = normalized_payload
 
             latest_packet = normalized_payload
             flight_history.append(normalized_payload)
 
-            # -------------------------------------------------
-            # Enviar para os clientes WebSocket
-            # -------------------------------------------------
             if CONNECTED_CLIENTS:
-                asyncio.run_coroutine_threadsafe(
-                    broadcast(normalized_payload),
-                    loop
-                )
+                cansat = cansats.get(cansat_id, {})
+                websocket_payload = {
+                    "type": "telemetry",
+                    "data": parsed,
+                    "cansat_status": cansat.get("status", "ONLINE"),
+                    "lost_packets": cansat.get("lost_packets", 0),
+                    "packet_status": parsed.get("packet_status", "received"),
+                    "packet_counts": get_packet_counts(cansat)
+                    if cansat
+                    else {},
+                }
+                emit_event(websocket_payload)
 
-            # -------------------------------------------------
-            # Gravar CSV
-            # -------------------------------------------------
             row = [parsed.get(h, "") for h in csv_headers]
 
-            with open(
-                csv_filename,
-                mode="a",
-                newline="",
-                encoding="utf-8"
-            ) as f:
+            with open(csv_filename, mode="a", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(row)
 
         except Exception as e:
             print(f"⚠️ [UDP Receiver] Erro: {e}")
 
+
 def check_cansat_status():
     while True:
         try:
             agora = time.time()
 
-            for cansat_id, cansat in cansats.items():
-                if agora - cansat["last_received"] >= 2.0:
-                    if cansat["status"] != "OFFLINE":
-                        cansat["status"] = "OFFLINE"
-                        print(f"🔴 CanSat {cansat_id} OFFLINE")
+            offline_events = []
+            with cansats_lock:
+                for cansat_id, cansat in cansats.items():
+                    if agora - cansat["last_received"] >= 2.0:
+                        if cansat["status"] != "OFFLINE":
+                            cansat["status"] = "OFFLINE"
+                            offline_events.append({
+                                "type": "cansat_status",
+                                "cansat_id": cansat_id,
+                                "status": "OFFLINE",
+                                "sequence": cansat["last_sequence"],
+                                "lost_packets": cansat["lost_packets"],
+                                "packet_counts": get_packet_counts(cansat),
+                            })
+                            print(f"🔴 CanSat {cansat_id} OFFLINE")
+
+            for status_payload in offline_events:
+                emit_event(status_payload)
 
             time.sleep(0.5)
 
@@ -219,7 +563,11 @@ def check_cansat_status():
 
 async def broadcast(message):
     if CONNECTED_CLIENTS:
-        await asyncio.gather(*(client.send(message) for client in CONNECTED_CLIENTS), return_exceptions=True)
+        await asyncio.gather(
+            *(client.send(message) for client in CONNECTED_CLIENTS),
+            return_exceptions=True,
+        )
+
 
 # --- WEBSOCKET SERVER ---
 async def ws_handler(websocket):
@@ -228,7 +576,7 @@ async def ws_handler(websocket):
     try:
         for past_packet in flight_history:
             await websocket.send(past_packet)
-            
+
         async for message in websocket:
             try:
                 data = json.loads(message)
@@ -236,12 +584,16 @@ async def ws_handler(websocket):
                     flight_history = []
                     latest_packet = None
                     print("🗑️ [Server] Histórico de voo limpo a pedido do cliente.")
+                elif data.get("type") == "command":
+                    result = handle_command(data)
+                    await websocket.send(json.dumps(result))
             except Exception:
                 pass
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
         CONNECTED_CLIENTS.remove(websocket)
+
 
 # --- SERVIDOR WEB HTTP ---
 HTML_CODE = r"""<!DOCTYPE html>
@@ -250,6 +602,7 @@ HTML_CODE = r"""<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CanSat Ground Station Live</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@2.2.1"></script>
     <style>
@@ -385,6 +738,82 @@ HTML_CODE = r"""<!DOCTYPE html>
             <button class="btn btn-clear" onclick="openClearModal()">🗑️ Limpar Dados</button>
             <div id="status" class="status">AGUARDANDO DADOS...</div>
             <span id="modeBadge" class="mode-badge live">MODO LIVE</span>
+        </div>
+    </div>
+
+        <!-- ========== MULTI-CANSAT OVERVIEW ========== -->
+    <div class="telemetry-card">
+        <h3>🛰️ CANSAT OVERVIEW</h3>
+
+        <div style="margin:8px 0;">
+            <button
+                id="btnGeneral"
+                onclick="selectGeneral()"
+                style="
+                    padding:6px 12px;
+                    border-radius:6px;
+                    border:1px solid #38bdf8;
+                    background:#0f172a;
+                    color:#38bdf8;
+                    cursor:pointer;
+                    font-weight:bold;
+                "
+            >
+                🌐 MODO GERAL
+            </button>
+        </div>
+
+        <div id="selectedCansat" style="
+            font-size:1.05em;
+            font-weight:400;
+            color:#38bdf8;
+            margin-top:6px;
+        ">
+            🌐 Modo Geral
+        </div>
+
+        <div style="overflow-x:auto;">
+            <table id="cansatOverviewTable" style="width:100%; border-collapse:collapse;">
+                <thead>
+                    <tr style="border-bottom:2px solid #475569;">
+                        <th style="text-align:left; padding:10px; color:#cbd5e1; font-weight:bold;">
+                            CanSat
+                        </th>
+                        <th style="text-align:left; padding:10px; color:#cbd5e1; font-weight:bold;">
+                            Estado
+                        </th>
+                        <th style="text-align:left; padding:10px; color:#cbd5e1; font-weight:bold;">
+                            Sequência
+                        </th>
+                        <th style="text-align:left; padding:10px; color:#cbd5e1; font-weight:bold;">
+                            Recebidos
+                        </th>
+                        <th style="text-align:left; padding:10px; color:#cbd5e1; font-weight:bold;">
+                            Pacotes perdidos
+                        </th>
+                        <th style="text-align:left; padding:10px; color:#cbd5e1; font-weight:bold;">
+                            Duplicados
+                        </th>
+                        <th style="text-align:left; padding:10px; color:#cbd5e1; font-weight:bold;">
+                            Incompletos
+                        </th>
+                        <th style="text-align:left; padding:10px; color:#cbd5e1; font-weight:bold;">
+                            CRC inválido
+                        </th>
+                        <th style="text-align:left; padding:10px; color:#cbd5e1; font-weight:bold;">
+                            Último pacote
+                        </th>
+                    </tr>
+                </thead>
+                
+                <tbody id="cansatOverviewBody">
+                    <tr>
+                        <td colspan="9" style="padding:15px; text-align:center; color:#94a3b8;">
+                            Aguardando CanSats...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
         </div>
     </div>
 
@@ -591,7 +1020,7 @@ HTML_CODE = r"""<!DOCTYPE html>
                         } 
                     },
                     plugins: {
-                        legend: { display: false },
+                        legend: { display: true },
                         annotation: {
                             annotations: {}
                         }
@@ -600,6 +1029,86 @@ HTML_CODE = r"""<!DOCTYPE html>
             });
         }
 
+        function updateOfflineAnnotations(chart) {
+            const annotations = {};
+
+            let ids = [];
+
+            if (viewMode === 'general') {
+                // Modo geral: mostrar OFFLINE de todos os CanSats
+                ids = Object.keys(cansatOfflinePeriods);
+            } else if (selectedCansat !== null) {
+                // Modo individual: mostrar apenas o CanSat selecionado
+                ids = [String(selectedCansat)];
+            }
+
+            ids.forEach(id => {
+                const periods = cansatOfflinePeriods[id] || [];
+
+                periods.forEach((period, index) => {
+                    if (period.start === null) {
+                        return;
+                    }
+
+                    if (period.end !== null) {
+                        annotations[`offline_${id}_${index}`] = {
+                            type: 'box',
+                            xMin: period.start + 's',
+                            xMax: period.end + 's',
+                            backgroundColor: 'rgba(239, 68, 68, 0.12)',
+                            borderColor: 'rgba(239, 68, 68, 0.45)',
+                            borderWidth: 1,
+                            label: {
+                                display: true,
+                                content: `CanSat ${id} OFFLINE`,
+                                position: 'start',
+                                color: '#fca5a5',
+                                backgroundColor: 'rgba(127, 29, 29, 0.75)',
+                                font: { size: 10, weight: 'bold' }
+                            }
+                        };
+                    } else {
+                        annotations[`offline_start_${id}_${index}`] = {
+                            type: 'line',
+                            xMin: period.start + 's',
+                            xMax: period.start + 's',
+                            borderColor: 'rgba(239, 68, 68, 0.9)',
+                            borderWidth: 2,
+                            label: {
+                                display: true,
+                                content: `CanSat ${id} OFFLINE`,
+                                position: 'start',
+                                color: '#fecaca',
+                                backgroundColor: 'rgba(127, 29, 29, 0.85)',
+                                font: { size: 10, weight: 'bold' }
+                            }
+                        };
+                    }
+
+                    if (period.end !== null) {
+                        annotations[`online_${id}_${index}`] = {
+                            type: 'line',
+                            xMin: period.end + 's',
+                            xMax: period.end + 's',
+                            borderColor: 'rgba(34, 197, 94, 0.9)',
+                            borderWidth: 2,
+                            label: {
+                                display: true,
+                                content: `CanSat ${id} ONLINE`,
+                                position: 'end',
+                                color: '#bbf7d0',
+                                backgroundColor: 'rgba(20, 83, 45, 0.85)',
+                                font: { size: 10, weight: 'bold' }
+                            }
+                        }
+                    }
+                });
+            });
+
+            chart.options.plugins.annotation.annotations = annotations;
+            chart.update('none');
+        }
+        
         const charts = {};
         chartConfigs.forEach(cfg => {
             charts[cfg.id] = makeChart(cfg.id, cfg.label, cfg.color);
@@ -1131,9 +1640,416 @@ HTML_CODE = r"""<!DOCTYPE html>
         }
 
         // ========== Core packet handler (shared by live + replay) ==========
+
+// ========== MULTI-CANSAT OVERVIEW ==========
+const cansatOverview = {};
+const cansatData = {};
+
+let selectedCansat = null;
+let viewMode = 'general';
+
+const cansatOfflinePeriods = {};
+
+const cansatColors = [
+    "#38bdf8", // CanSat 1 — Azul
+    "#22c55e", // CanSat 2 — Verde
+    "#f59e0b", // CanSat 3 — Laranja
+    "#a855f7", // CanSat 4 — Roxo
+    "#ef4444", // CanSat 5 — Vermelho
+    "#eab308", // CanSat 6 — Amarelo
+    "#06b6d4", // CanSat 7 — Ciano
+    "#ec4899", // CanSat 8 — Rosa
+    "#92400e", // CanSat 9 — Castanho
+    "#94a3b8"  // CanSat 10 — Cinzento
+];
+
+function getCansatColor(id) {
+    return cansatColors[(Number(id) - 1) % cansatColors.length];
+}
+
+function updateCansatOverview(data) {
+    const id = data.cansat_id;
+
+    if (id === undefined || id === null) return;
+
+    if (!cansatOverview[id]) {
+        cansatOverview[id] = {
+            status: 'ONLINE',
+            sequence: data.sequence ?? '—',
+            lost: 0,
+            received: 0,
+            duplicate: 0,
+            incomplete: 0,
+            crcInvalid: 0,
+            lastPacket: Date.now()
+        };
+    }
+
+    const cansat = cansatOverview[id];
+
+    const wasOffline = cansat.status === 'OFFLINE';
+
+    if (!cansatOfflinePeriods[id]) {
+        cansatOfflinePeriods[id] = [];
+    }
+
+    if (wasOffline) {
+        const lastHistory = cansatData[id] || [];
+        const lastPacket = lastHistory[lastHistory.length - 1];
+
+        const startTime = lastPacket && lastPacket.tempo !== undefined
+            ? parseFloat(lastPacket.tempo)
+            : null;
+
+        const lastPeriod =
+            cansatOfflinePeriods[id][cansatOfflinePeriods[id].length - 1];
+
+        if (lastPeriod && lastPeriod.end === null) {
+            lastPeriod.end = startTime;
+        }
+    }
+
+    cansat.status = 'ONLINE';
+    cansat.sequence = data.sequence ?? cansat.sequence;
+    cansat.lost = data.lost_packets ?? cansat.lost;
+    updatePacketCounters(id, data.packet_counts);
+    cansat.lastPacket = Date.now();
+
+    renderCansatOverview();
+}
+
+function updatePacketCounters(id, counts) {
+    if (id === undefined || id === null || !counts) return;
+
+    if (!cansatOverview[id]) {
+        cansatOverview[id] = {
+            status: 'ONLINE',
+            sequence: '—',
+            lost: 0,
+            received: 0,
+            duplicate: 0,
+            incomplete: 0,
+            crcInvalid: 0,
+            lastPacket: Date.now()
+        };
+    }
+
+    const cansat = cansatOverview[id];
+    cansat.received = counts.received ?? cansat.received;
+    cansat.lost = counts.lost ?? cansat.lost;
+    cansat.duplicate = counts.duplicate ?? cansat.duplicate;
+    cansat.incomplete = counts.incomplete ?? cansat.incomplete;
+    cansat.crcInvalid = counts.crc_invalid ?? cansat.crcInvalid;
+}
+
+function selectGeneral() {
+    selectedCansat = null;
+    viewMode = 'general';
+    document.getElementById('selectedCansat').textContent = '🌐 Modo Geral';
+    rebuildChartsForGeneral();
+    console.log("Modo Geral selecionado");
+}
+
+function rebuildChartsForSelectedCansat() {
+    chartConfigs.forEach(cfg => {
+        const chart = charts[cfg.id];
+
+        if (!chart) return;
+
+        // Limpar completamente o gráfico
+        chart.data.labels = [];
+        chart.data.datasets = [];
+
+        const history = cansatData[selectedCansat] || [];
+
+        const labels = [];
+        const values = [];
+
+        history.forEach(packet => {
+            const value = packet[cfg.key];
+
+            if (value !== undefined && value !== null) {
+                const numTime = packet.tempo !== undefined
+                    ? parseFloat(packet.tempo)
+                    : 0;
+
+                labels.push(numTime + "s");
+                values.push(value);
+            }
+        });
+
+        // Manter apenas os últimos 2000 pontos
+        if (labels.length > 2000) {
+            const start = labels.length - 2000;
+
+            labels.splice(0, start);
+            values.splice(0, start);
+        }
+
+        chart.data.labels = labels;
+
+        chart.data.datasets.push({
+            label: `CanSat ${selectedCansat}`,
+            data: values,
+            borderColor: getCansatColor(selectedCansat),
+            backgroundColor: getCansatColor(selectedCansat),
+            borderWidth: 2,
+            fill: false,
+            tension: 0.15,
+            pointRadius: 0,
+            spanGaps: true
+        });
+
+        chart.update('none');
+
+        updateOfflineAnnotations(chart);
+        
+        updateKPIs(cfg.id, values);
+    });
+}
+
+function rebuildChartsForGeneral() {
+    chartConfigs.forEach(cfg => {
+        const chart = charts[cfg.id];
+
+        if (!chart) return;
+
+        const cansatIds = Object.keys(cansatData)
+            .map(Number)
+            .sort((a, b) => a - b);
+
+        // Recolher todos os tempos existentes
+        const allTimes = new Set();
+
+        cansatIds.forEach(id => {
+            const history = cansatData[id] || [];
+
+            history.forEach(packet => {
+                if (packet.tempo !== undefined && packet.tempo !== null) {
+                    const tempo = parseFloat(packet.tempo);
+
+                    if (!isNaN(tempo)) {
+                        allTimes.add(tempo);
+                    }
+                }
+            });
+        });
+
+        const times = Array.from(allTimes).sort((a, b) => a - b);
+
+        // Limitar aos últimos 2000 pontos
+        const visibleTimes = times.length > 2000
+            ? times.slice(-2000)
+            : times;
+
+        chart.data.labels = visibleTimes.map(t => t + "s");
+        chart.data.datasets = [];
+
+        // Criar UMA linha para cada CanSat
+        cansatIds.forEach(id => {
+            const history = cansatData[id] || [];
+
+            const valuesByTime = {};
+
+            history.forEach(packet => {
+                if (
+                    packet.tempo !== undefined &&
+                    packet.tempo !== null &&
+                    packet[cfg.key] !== undefined &&
+                    packet[cfg.key] !== null
+                ) {
+                    const tempo = parseFloat(packet.tempo);
+
+                    if (!isNaN(tempo)) {
+                        valuesByTime[tempo] = packet[cfg.key];
+                    }
+                }
+            });
+
+            const values = visibleTimes.map(tempo => {
+                return valuesByTime[tempo] !== undefined
+                    ? valuesByTime[tempo]
+                    : null;
+            });
+
+            // Só adicionar o CanSat se tiver dados para este gráfico
+            if (values.some(value => value !== null)) {
+                chart.data.datasets.push({
+                    label: `CanSat ${id}`,
+                    data: values,
+                    borderColor: getCansatColor(id),
+                    backgroundColor: getCansatColor(id),
+                    borderWidth: 2,
+                    fill: false,
+                    tension: 0.15,
+                    pointRadius: 0,
+                    spanGaps: true
+                });
+            }
+        });
+
+        chart.update('none');
+
+        updateOfflineAnnotations(chart);
+
+        // Calcular KPIs usando todos os valores disponíveis
+        const allValues = [];
+
+        chart.data.datasets.forEach(dataset => {
+            dataset.data.forEach(value => {
+                if (value !== null && value !== undefined) {
+                    const number = parseFloat(value);
+
+                    if (!isNaN(number)) {
+                        allValues.push(number);
+                    }
+                }
+            });
+        });
+
+        updateKPIs(cfg.id, allValues);
+    });
+}
+
+function selectCansatFromCheckbox(id, checked) {
+    if (checked) {
+        document.querySelectorAll('.cansat-selector').forEach(box => {
+            if (box.dataset.cansatId !== String(id)) {
+                box.checked = false;
+            }
+        });
+
+        selectCansat(id);
+
+    } else {
+        if (selectedCansat === id) {
+            selectGeneral();
+        }
+    }
+}
+
+function selectCansat(id) {
+    selectedCansat = id;
+    viewMode = 'cansat';
+    document.getElementById('selectedCansat').textContent = `🛰️ CanSat ${id} selecionado`;
+    rebuildChartsForSelectedCansat();
+    console.log("CanSat selecionado:", selectedCansat);
+}
+
+        function renderCansatOverview() {
+            const tbody = document.getElementById('cansatOverviewBody');
+            if (!tbody) return;
+
+            const ids = Object.keys(cansatOverview)
+                .map(Number)
+                .sort((a, b) => a - b);
+
+            if (ids.length === 0) return;
+
+            if (btnGeneral) {
+                btnGeneral.style.display = ids.length >= 2 ? 'inline-block' : 'none';
+            }
+            
+            let html = '';
+
+            ids.forEach(id => {
+                const cansat = cansatOverview[id];
+
+                html += `
+                    <tr
+                        style="
+                            border-bottom:1px solid #475569;
+                            cursor:pointer;
+                            transition:background 0.2s;
+                        "
+                        onmouseover="this.style.background='#1e293b'"
+                        onmouseout="this.style.background='transparent'"
+                    >
+                        <td style="padding:10px; font-weight:bold;">
+                            <label style="
+                                display:flex;
+                                align-items:center;
+                                gap:8px;
+                                cursor:pointer;
+                            ">
+                                <input
+                                    type="checkbox"
+                                    class="cansat-selector"
+                                    data-cansat-id="${id}"
+                                    onchange="selectCansatFromCheckbox(${id}, this.checked)"
+                                    ${selectedCansat === id ? 'checked' : ''}
+                                    style="
+                                        width:18px;
+                                        height:18px;
+                                        cursor:pointer;
+                                    "
+                                >
+                                <span style="
+                                    color:${getCansatColor(id)};
+                                    font-weight:bold;
+                                ">
+                                    🛰️ CanSat ${id}
+                                </span>
+                                
+                            </label>
+                        </td>
+
+                            <td style="padding:10px;">
+                                <span style="
+                                color:${cansat.status === 'ONLINE' ? '#22c55e' : '#ef4444'};
+                                font-weight:bold;
+                            ">
+                                ${cansat.status === 'ONLINE' ? '🟢' : '🔴'} ${cansat.status}
+                          </span>
+                        </td>
+                    
+                        <td style="padding:10px;">
+                            ${cansat.sequence}
+                        </td>
+
+                        <td style="padding:10px;">
+                            ${cansat.received ?? 0}
+                        </td>
+
+                        <td style="padding:10px;">
+                            ${cansat.lost}
+                        </td>
+
+                        <td style="padding:10px;">
+                            ${cansat.duplicate ?? 0}
+                        </td>
+
+                        <td style="padding:10px;">
+                            ${cansat.incomplete ?? 0}
+                        </td>
+
+                        <td style="padding:10px;">
+                            ${cansat.crcInvalid ?? 0}
+                        </td>
+
+                        <td style="padding:10px;">
+                            ${new Date(cansat.lastPacket).toLocaleTimeString()}
+                        </td>
+                    </tr>
+                `;
+            });
+
+            tbody.innerHTML = html;
+        }
+
         function processPacket(data, fromReplay = false) {
             if (!fromReplay && currentMode === 'replay') return; // ignore live while in replay
             if (!fromReplay) rawDataLog.push(data);
+            
+            updateCansatOverview(data);
+            
+            if (data.cansat_id !== undefined && data.cansat_id !== null) {
+                if (!cansatData[data.cansat_id]) {
+                    cansatData[data.cansat_id] = [];
+                }
+
+                cansatData[data.cansat_id].push(data);
+            }
 
             document.getElementById('status').innerText = "ESTADO: " + (data.estado || "N/D");
             if (data.rssi !== undefined) document.getElementById('liveRssi').textContent = data.rssi + ' dBm';
@@ -1147,21 +2063,33 @@ HTML_CODE = r"""<!DOCTYPE html>
                 addPhaseLine(currentState, t, numTime);
             }
 
-            chartConfigs.forEach(cfg => {
-                const chart = charts[cfg.id];
-                const val = data[cfg.key];
-                if (val !== undefined && val !== null) {
-                    chart.data.labels.push(t);
-                    chart.data.datasets[0].data.push(val);
-                    // Keep charts from growing forever in long replay
-                    if (chart.data.labels.length > 2000) {
-                        chart.data.labels.shift();
-                        chart.data.datasets[0].data.shift();
+            if (selectedCansat === null) {
+                // Modo Geral:
+                // reconstruir os gráficos com todos os CanSats
+                rebuildChartsForGeneral();
+
+            } else if (data.cansat_id === selectedCansat) {
+
+                // Modo individual:
+                // mostrar apenas o CanSat selecionado
+                chartConfigs.forEach(cfg => {
+                    const chart = charts[cfg.id];
+                    const val = data[cfg.key];
+
+                    if (val !== undefined && val !== null) {
+                        chart.data.labels.push(t);
+                        chart.data.datasets[0].data.push(val);
+
+                        if (chart.data.labels.length > 2000) {
+                            chart.data.labels.shift();
+                            chart.data.datasets[0].data.shift();
+                        }
+
+                        chart.update('none');
+                        updateKPIs(cfg.id, chart.data.datasets[0].data);
                     }
-                    chart.update('none');
-                    updateKPIs(cfg.id, chart.data.datasets[0].data);
-                }
-            });
+                });
+            }
 
             // FASE 1–3
             updateParachute(data);
@@ -1218,11 +2146,98 @@ HTML_CODE = r"""<!DOCTYPE html>
 
         ws.onmessage = (event) => {
             try {
-                const data = JSON.parse(event.data);
-                processPacket(data, false);
+                const message = JSON.parse(event.data);
+
+                if (message.type === "telemetry") {
+                    const data = message.data;
+
+                    data.cansat_status = message.cansat_status;
+                    data.lost_packets = message.lost_packets;
+                    data.packet_counts = message.packet_counts;
+
+                    processPacket(data, false);
+
+                } else if (message.type === "cansat_status") {
+                    const id = message.cansat_id;
+
+                    if (id !== undefined && id !== null) {
+
+                        if (!cansatOfflinePeriods[id]) {
+                            cansatOfflinePeriods[id] = [];
+                        }
+
+                        if (!cansatOverview[id]) {
+                            cansatOverview[id] = {
+                                status: message.status,
+                                sequence: message.sequence ?? '—',
+                                lost: message.lost_packets ?? 0,
+                                received: 0,
+                                duplicate: 0,
+                                incomplete: 0,
+                                crcInvalid: 0,
+                                lastPacket: Date.now()
+                            };
+                        }
+
+                        const previousStatus = cansatOverview[id].status;
+
+                        if (
+                            message.status === 'OFFLINE' &&
+                            previousStatus !== 'OFFLINE'
+                        ) {
+                            const history = cansatData[id] || [];
+                            const lastPacket = history[history.length - 1];
+
+                            const startTime = lastPacket && lastPacket.tempo !== undefined
+                                ? parseFloat(lastPacket.tempo)
+                                : 0;
+
+                            cansatOfflinePeriods[id].push({
+                                start: startTime,
+                                end: null
+                            });
+
+                            console.log(
+                                `🔴 CanSat ${id} OFFLINE desde ${startTime}s`
+                            );
+                            Object.values(charts).forEach(updateOfflineAnnotations);
+                        }
+
+                        if (
+                            message.status === 'ONLINE' &&
+                            previousStatus === 'OFFLINE'
+                        ) {
+                            const periods = cansatOfflinePeriods[id];
+                            const lastPeriod = periods[periods.length - 1];
+                            const recoveryTime = Number(message.mission_time_ms) / 1000;
+
+                            if (lastPeriod && lastPeriod.end === null && Number.isFinite(recoveryTime)) {
+                                lastPeriod.end = recoveryTime;
+                                Object.values(charts).forEach(updateOfflineAnnotations);
+                            }
+                        }
+
+                        cansatOverview[id].status = message.status;
+                        cansatOverview[id].sequence =
+                            message.sequence ?? cansatOverview[id].sequence;
+
+                        cansatOverview[id].lost =
+                            message.lost_packets ?? cansatOverview[id].lost;
+
+                        updatePacketCounters(id, message.packet_counts);
+
+                        renderCansatOverview();
+                    }
+
+                } else if (message.type === "packet_status") {
+                    updatePacketCounters(message.cansat_id, message.packet_counts);
+                    renderCansatOverview();
+                } else {
+                    processPacket(message, false);
+                }
+
             } catch(e) {}
         };
-
         // ========== FASE 4: Replay ==========
         function setMode(mode) {
             currentMode = mode;
@@ -1245,49 +2260,78 @@ HTML_CODE = r"""<!DOCTYPE html>
         function parseCSV(text) {
             const lines = text.trim().split(/\r?\n/);
             if (lines.length < 2) return [];
+
             const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+            const hasCansatId = headers.includes('cansat_id');
+
             const rows = [];
+
             for (let i = 1; i < lines.length; i++) {
                 const cols = lines[i].split(',');
                 const obj = {};
+
                 headers.forEach((h, idx) => {
                     let v = cols[idx] !== undefined ? cols[idx].trim() : '';
-                    if (v === '') { obj[h] = null; return; }
+
+                    if (v === '') {
+                        obj[h] = null;
+                        return;
+                    }
+
                     const num = parseFloat(v);
                     obj[h] = isNaN(num) ? v : num;
                 });
+
+                // CSV antigo sem cansat_id → assumir CanSat 1
+                if (!hasCansatId) {
+                    obj.cansat_id = 1;
+                }
+
                 // Normalize boolean-ish
-                if (obj.paraquedas === 1 || obj.paraquedas === '1' || obj.paraquedas === 'true') obj.paraquedas = true;
-                if (obj.paraquedas === 0 || obj.paraquedas === '0' || obj.paraquedas === 'false') obj.paraquedas = false;
+                if (obj.paraquedas === 1 || obj.paraquedas === '1' || obj.paraquedas === 'true') {
+                    obj.paraquedas = true;
+                }
+
+                if (obj.paraquedas === 0 || obj.paraquedas === '0' || obj.paraquedas === 'false') {
+                    obj.paraquedas = false;
+                }
+
                 rows.push(obj);
             }
+
             // Sort by tempo if present
             rows.sort((a, b) => (a.tempo || 0) - (b.tempo || 0));
+
             return rows;
         }
 
-        function loadCSVFile(ev) {
-            const file = ev.target.files[0];
-            if (!file) return;
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                replayData = parseCSV(e.target.result);
-                replayIndex = 0;
-                document.getElementById('scrubber').max = Math.max(0, replayData.length - 1);
-                document.getElementById('scrubber').value = 0;
-                updateReplayTimeLabel();
-                clearDashboardChartsOnly();
-                if (replayData.length) {
-                    processPacket(replayData[0], true);
-                    document.getElementById('status').innerText = `REPLAY: ${replayData.length} amostras carregadas`;
-                } else {
-                    alert('CSV inválido ou vazio.');
-                }
-            };
-            reader.readAsText(file);
-        }
+            function loadCSVFile(ev) {
+                const file = ev.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    replayData = parseCSV(e.target.result);
+                    replayIndex = 0;
+                    document.getElementById('scrubber').max = Math.max(0, replayData.length - 1);
+                    document.getElementById('scrubber').value = 0;
+                    updateReplayTimeLabel();
+                    clearDashboardChartsOnly();
+                    if (replayData.length) {
+                        processPacket(replayData[0], true);
+                        document.getElementById('status').innerText = `REPLAY: ${replayData.length} amostras carregadas`;
+                    } else {
+                        alert('CSV inválido ou vazio.');
+                    }
+                };
+                reader.readAsText(file);
+            }
 
         function clearDashboardChartsOnly() {
+        
+            Object.keys(cansatData).forEach(id => {
+                delete cansatData[id];
+            });
+        
             currentState = null;
             lastPhaseTime = -999;
             lastPhaseLabelTime = "";
@@ -1412,31 +2456,151 @@ HTML_CODE = r"""<!DOCTYPE html>
             onScrub(best);
         }
 
-        // ========== Export / Clear (original) ==========
-        function downloadCSV() {
+        // ========== Export / Clear ==========
+        async function downloadCSV() {
             if (rawDataLog.length === 0 && currentMode === 'live') {
                 alert("Não existem dados acumulados para exportar.");
                 return;
             }
-            const source = currentMode === 'replay' && replayData.length ? replayData : rawDataLog;
+
+            const source = currentMode === 'replay' && replayData.length
+                ? replayData
+                : rawDataLog;
+
             if (!source.length) {
                 alert("Não existem dados acumulados para exportar.");
                 return;
             }
-            let csv = "id,tempo,estado,altitude,velocidade,forca_g,temperatura,humidade,pressao,eco2,tvoc,uv,lux\\n";
-            source.forEach(row => {
-                csv += `${row.id},${row.tempo},${row.estado},${row.altitude},${row.velocidade},${row.forca_g},${row.temperatura},${row.humidade},${row.pressao},${row.eco2},${row.tvoc},${row.uv},${row.lux}\\n`;
-            });
-            const blob = new Blob([csv], { type: 'text/csv' });
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            
+
+            if (typeof JSZip === 'undefined') {
+                alert("Erro: biblioteca ZIP não carregada.");
+                return;
+            }
+
             const now = new Date();
-            const timestamp = now.toISOString().replace('T', '_').replace(/:/g, '-').slice(0, 19);
-            
-            a.setAttribute('href', url);
-            a.setAttribute('download', `voo_cansat_${timestamp}.csv`);
+            const timestamp = now.toISOString()
+                .replace('T', '_')
+                .replace(/:/g, '-')
+                .slice(0, 19);
+
+            const folderName = `voo_${timestamp}`;
+
+            const zip = new JSZip();
+            const folder = zip.folder(folderName);
+
+            const headers = [
+                "id",
+                "tempo",
+                "estado",
+                "cansat_id",
+                "sequence",
+                "mission_time_ms",
+                "altitude",
+                "velocidade",
+                "aceleracao",
+                "forca_g",
+                "temperatura",
+                "humidade",
+                "pressao",
+                "eco2",
+                "tvoc",
+                "uv",
+                "lux",
+                "acc_x",
+                "acc_y",
+                "acc_z",
+                "gyro_x",
+                "gyro_y",
+                "gyro_z",
+                "pitch",
+                "roll",
+                "yaw",
+                "paraquedas",
+                "rssi",
+                "snr"
+            ];
+
+            function escapeCSV(value) {
+                if (value === undefined || value === null) {
+                    return "";
+                }
+
+                const text = String(value);
+
+                if (
+                    text.includes(",") ||
+                    text.includes('"') ||
+                    text.includes("\n")
+                ) {
+                    return `"${text.replace(/"/g, '""')}"`;
+                }
+
+                return text;
+            }
+
+            function createCSV(rows) {
+                let csv = headers.join(",") + "\n";
+
+                rows.forEach(row => {
+                    csv += headers
+                        .map(header => escapeCSV(row[header]))
+                        .join(",") + "\n";
+                });
+
+                return csv;
+            }
+
+            // CSV GERAL
+            folder.file(
+                "geral.csv",
+                createCSV(source)
+            );
+
+            // Separar por CanSat
+            const cansatGroups = {};
+
+            source.forEach(row => {
+                let id = row.cansat_id;
+
+                // Compatibilidade com CSVs antigos
+                if (id === undefined || id === null || id === "") {
+                    id = 1;
+                }
+
+                if (!cansatGroups[id]) {
+                    cansatGroups[id] = [];
+                }
+
+                cansatGroups[id].push(row);
+            });
+
+            Object.keys(cansatGroups)
+                .sort((a, b) => Number(a) - Number(b))
+                .forEach(id => {
+                    folder.file(
+                        `cansat_${id}.csv`,
+                        createCSV(cansatGroups[id])
+                    );
+                });
+
+            // Criar ZIP
+            const blob = await zip.generateAsync({
+                type: "blob"
+            });
+
+            const url = window.URL.createObjectURL(blob);
+
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${folderName}.zip`;
+
+            document.body.appendChild(a);
             a.click();
+            a.remove();
+
+            window.URL.revokeObjectURL(url);
+
+            console.log(`📦 Voo exportado: ${folderName}`);
         }
 
         async function downloadChartsAsImages() {
@@ -1514,14 +2678,41 @@ HTML_CODE = r"""<!DOCTYPE html>
 
         function confirmClear(shouldDownload) {
             if (shouldDownload) {
-                downloadCSV();
+                downloadCSV().then(() => {
+                    clearDashboard();
+                    closeClearModal();
+                }).catch((error) => {
+                    console.error("Erro ao exportar antes de limpar:", error);
+                    alert("Erro ao criar o backup. Os dados NÃO foram eliminados.");
+                });
+
+                return;
             }
+
             clearDashboard();
             closeClearModal();
         }
 
         function clearDashboard() {
             rawDataLog = [];
+
+            
+    Object.keys(cansatOverview).forEach(key => {
+        delete cansatOverview[key];
+    });
+
+    const overviewBody = document.getElementById('cansatOverviewBody');
+    if (overviewBody) {
+        overviewBody.innerHTML = `
+            <tr>
+                <td colspan="9" style="padding:15px; text-align:center; color:#94a3b8;">
+                    Aguardando CanSats...
+                </td>
+            </tr>
+        `;
+    }
+
+
             currentState = null;
             lastPhaseTime = -999;
             lastPhaseLabelTime = "";
@@ -1575,33 +2766,43 @@ HTML_CODE = r"""<!DOCTYPE html>
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+
 class SimpleHTTPHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(HTML_CODE.encode('utf-8'))
+        self.wfile.write(HTML_CODE.encode("utf-8"))
+
     def log_message(self, format, *args):
         return
 
+
 def run_http_server():
-    server = HTTPServer(('127.0.0.1', 8050), SimpleHTTPHandler)
+    server = HTTPServer(("127.0.0.1", 8050), SimpleHTTPHandler)
     print("🌐 [Web Server] Aceda ao site em: http://127.0.0.1:8050")
     server.serve_forever()
 
+
 loop = None
 
-async def main():
+
+async def main(transport_factory=UDPTransport):
     global loop
     loop = asyncio.get_running_loop()
-    
-    threading.Thread(target=udp_receiver, daemon=True).start()
+
+    threading.Thread(
+        target=transport_receiver,
+        args=(transport_factory,),
+        daemon=True,
+    ).start()
     threading.Thread(target=check_cansat_status, daemon=True).start()
     threading.Thread(target=run_http_server, daemon=True).start()
-    
+
     print("🚀 [WebSocket Server] Ativo na porta 8051...")
     async with websockets.serve(ws_handler, "127.0.0.1", 8051):
         await asyncio.Future()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
