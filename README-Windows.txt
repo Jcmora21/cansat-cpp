@@ -43,7 +43,11 @@ No Windows (PowerShell ou CMD), garante que tens instalado:
    https://www.python.org/downloads/
 
 2. Compilador C++ (g++ via MinGW / w64devkit):
-   Garante que o comando g++ esta acessivel no terminal.
+   Instala o MSYS2 e, no terminal MSYS2 UCRT64, instala o compilador e a
+   biblioteca JSON:
+     pacman -Syu
+     pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nlohmann-json
+   Se necessario, fecha e volta a abrir o terminal quando o pacman pedir.
 
 Instalacao de dependencias Python:
   pip install websockets
@@ -60,17 +64,19 @@ A Estacao de Solo deve ser SEMPRE iniciada antes do Simulador.
 
 PASSO 1: Iniciar a Estacao de Solo (Terminal 1 - PowerShell/CMD)
 -----------------------------------------------------------------
-Executa o comando:
-  python groundstation_clean.py
+No PowerShell, na pasta do projeto, executa:
+  $env:PYTHONUTF8 = "1"
+  python .\groundstation_clean.py
 
 - Servidores iniciados: UDP (5005), WebSocket (8051) e Web (8050).
 - Acede no navegador web ao endereco: http://127.0.0.1:8050
+- Mantem este terminal aberto.
 
 PASSO 2: Compilar e Iniciar o Simulador (Terminal 2 - PowerShell/CMD)
 ----------------------------------------------------------------------
 Abre um segundo terminal e executa:
-  cd simulador
-  g++ simulador.cpp -o simulador.exe -lws2_32
+  cd .\simulador
+  .\compilar.bat
   .\simulador.exe
 
 (Nota: No Windows, para sockets em C++, e necessario compilar com -lws2_32).

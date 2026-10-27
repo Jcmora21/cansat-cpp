@@ -5,9 +5,14 @@
 #include <cmath>
 #include <random>
 #include <iomanip>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#endif
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -17,16 +22,40 @@ using json = nlohmann::json;
 #endif
 
 int main() {
+#ifdef _WIN32
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "Erro ao inicializar Winsock\n";
+        return 1;
+    }
+
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock == INVALID_SOCKET) {
+        std::cerr << "Erro ao criar socket UDP: " << WSAGetLastError() << "\n";
+        WSACleanup();
+        return 1;
+    }
+#else
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         std::cerr << "Erro ao criar socket UDP\n";
         return 1;
     }
+#endif
 
     sockaddr_in destAddr{};
     destAddr.sin_family = AF_INET;
     destAddr.sin_port = htons(5005);
-    inet_pton(AF_INET, "127.0.0.1", &destAddr.sin_addr);
+    if (inet_pton(AF_INET, "127.0.0.1", &destAddr.sin_addr) != 1) {
+        std::cerr << "Erro ao configurar o endereco do servidor UDP\n";
+#ifdef _WIN32
+        closesocket(sock);
+        WSACleanup();
+#else
+        close(sock);
+#endif
+        return 1;
+    }
 
     int id_pacote = 0;
     double tempo = 0.0;
@@ -150,7 +179,22 @@ int main() {
         };
 
         std::string msg = packet.dump();
-        sendto(sock, msg.c_str(), msg.size(), 0, (struct sockaddr*)&destAddr, sizeof(destAddr));
+        int bytes_sent = sendto(sock, msg.c_str(), static_cast<int>(msg.size()), 0,
+                                reinterpret_cast<const sockaddr*>(&destAddr), sizeof(destAddr));
+#ifdef _WIN32
+        if (bytes_sent == SOCKET_ERROR) {
+            std::cerr << "Erro ao enviar pacote UDP: " << WSAGetLastError() << "\n";
+            closesocket(sock);
+            WSACleanup();
+            return 1;
+        }
+#else
+        if (bytes_sent < 0) {
+            std::cerr << "Erro ao enviar pacote UDP\n";
+            close(sock);
+            return 1;
+        }
+#endif
 
         // --- IMPRESSÃO FORMATADA ---
         std::cout << "\033[1;1H";
@@ -206,6 +250,11 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
+#ifdef _WIN32
+    closesocket(sock);
+    WSACleanup();
+#else
     close(sock);
+#endif
     return 0;
 }
