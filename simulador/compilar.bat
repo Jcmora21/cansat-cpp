@@ -12,7 +12,7 @@ if errorlevel 1 (
     )
 )
 
-g++ -std=c++17 -Wall -Wextra simulador.cpp -o simulador.exe -lws2_32
+g++ -std=c++17 -Wall -Wextra -static simulador.cpp -o simulador.exe -lws2_32
 if errorlevel 1 exit /b %ERRORLEVEL%
 
 echo Compilacao concluida: simulador.exe

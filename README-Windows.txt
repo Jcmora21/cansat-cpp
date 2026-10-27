@@ -45,7 +45,8 @@ No Windows (PowerShell ou CMD), garante que tens instalado:
 
 2. Compilador C++ (g++ via MinGW / w64devkit):
    Instala o MSYS2 e, no terminal MSYS2 UCRT64, instala o compilador e a
-   biblioteca JSON:
+   biblioteca JSON. A compilacao inclui as bibliotecas de runtime no
+   executavel, para nao depender das DLLs do MSYS2 ao iniciar:
      pacman -Syu
      pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nlohmann-json
    Se necessario, fecha e volta a abrir o terminal quando o pacman pedir.
