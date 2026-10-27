@@ -5,6 +5,7 @@ import websockets
 import threading
 import csv
 import os
+import math
 from datetime import datetime
 
 # 📁 Criar pasta para logs
@@ -17,6 +18,11 @@ csv_filename = os.path.join(LOG_DIR, f"voo_cansat_{session_time}.csv")
 latest_packet = None
 flight_history = []
 CONNECTED_CLIENTS = set()
+receiving_enabled = True
+accepted_packet_count = 0
+discarded_paused_packet_count = 0
+receiver_state_lock = threading.Lock()
+MAX_FLIGHT_HISTORY = 2000
 
 csv_headers = [
     "id", "tempo", "estado", "altitude", "velocidade", "forca_g", "aceleracao",
@@ -24,6 +30,59 @@ csv_headers = [
     "paraquedas", "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z",
     "pitch", "roll", "yaw", "rssi", "snr"
 ]
+
+NUMERIC_FIELDS = {
+    "tempo", "altitude", "velocidade", "forca_g", "aceleracao",
+    "temperatura", "humidade", "pressao", "eco2", "tvoc", "uv", "lux",
+    "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z",
+    "pitch", "roll", "yaw", "rssi", "snr", "packet_loss"
+}
+REQUIRED_FIELDS = {"id", "tempo", "estado", "altitude"}
+
+
+def reject_nonstandard_json_constant(value):
+    raise ValueError(f"constante JSON não permitida: {value}")
+
+
+def parse_and_validate_packet(payload):
+    try:
+        packet = json.loads(payload, parse_constant=reject_nonstandard_json_constant)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"JSON inválido: {exc.msg}") from exc
+
+    if not isinstance(packet, dict):
+        raise ValueError("o pacote JSON tem de ser um objeto")
+
+    missing_fields = REQUIRED_FIELDS - packet.keys()
+    if missing_fields:
+        raise ValueError(f"faltam campos obrigatórios: {', '.join(sorted(missing_fields))}")
+
+    packet_id = packet["id"]
+    if isinstance(packet_id, bool) or not isinstance(packet_id, int) or packet_id < 0:
+        raise ValueError("'id' tem de ser um inteiro não negativo")
+
+    for field in NUMERIC_FIELDS.intersection(packet):
+        value = packet[field]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"'{field}' tem de ser um número finito")
+        try:
+            is_finite = math.isfinite(value)
+        except OverflowError:
+            is_finite = False
+        if not is_finite:
+            raise ValueError(f"'{field}' tem de ser um número finito")
+
+    if packet["tempo"] < 0:
+        raise ValueError("'tempo' não pode ser negativo")
+
+    if not isinstance(packet["estado"], str) or not packet["estado"].strip():
+        raise ValueError("'estado' tem de ser texto não vazio")
+
+    if "paraquedas" in packet and not isinstance(packet["paraquedas"], bool):
+        raise ValueError("'paraquedas' tem de ser true ou false")
+
+    return packet
+
 
 def init_csv(filename):
     with open(filename, mode='w', newline='', encoding='utf-8') as f:
@@ -35,7 +94,8 @@ print(f"💾 [Logger] Gravação automática de dados ativa em: {csv_filename}")
 
 # --- THREAD UDP ---
 def udp_receiver():
-    global latest_packet, flight_history
+    global latest_packet, flight_history, accepted_packet_count
+    global discarded_paused_packet_count
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("127.0.0.1", 5005))
@@ -43,43 +103,122 @@ def udp_receiver():
     
     while True:
         try:
-            data, _ = sock.recvfrom(2048)
-            payload = data.decode('utf-8')
-            latest_packet = payload
-            flight_history.append(payload)
-            
-            if CONNECTED_CLIENTS:
-                asyncio.run_coroutine_threadsafe(broadcast(payload), loop)
+            data, address = sock.recvfrom(2049)
+        except OSError as exc:
+            print(f"❌ [UDP Receiver] Erro ao receber dados: {exc}")
+            return
 
-            parsed = json.loads(payload)
-            row = [parsed.get(h, "") for h in csv_headers]
-            with open(csv_filename, mode='a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(row)
-        except Exception:
-            pass
+        with receiver_state_lock:
+            if not receiving_enabled:
+                discarded_paused_packet_count += 1
+                continue
+
+        if len(data) > 2048:
+            print(f"⚠️ [UDP Receiver] Pacote de {address[0]}:{address[1]} descartado: excede 2048 bytes.")
+            continue
+
+        try:
+            payload = data.decode("utf-8")
+            parsed = parse_and_validate_packet(payload)
+        except UnicodeDecodeError as exc:
+            print(f"⚠️ [UDP Receiver] Pacote de {address[0]}:{address[1]} descartado: UTF-8 inválido ({exc}).")
+            continue
+        except (ValueError, RecursionError) as exc:
+            print(f"⚠️ [UDP Receiver] Pacote de {address[0]}:{address[1]} descartado: {exc}.")
+            continue
+
+        try:
+            with receiver_state_lock:
+                if not receiving_enabled:
+                    discarded_paused_packet_count += 1
+                    continue
+
+                row = [parsed.get(header, "") for header in csv_headers]
+                with open(csv_filename, mode="a", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(row)
+
+                latest_packet = payload
+                flight_history.append(payload)
+                if len(flight_history) > MAX_FLIGHT_HISTORY:
+                    del flight_history[:-MAX_FLIGHT_HISTORY]
+                accepted_packet_count += 1
+        except OSError as exc:
+            print(f"❌ [CSV] Não foi possível guardar o pacote recebido: {exc}")
+            continue
+
+        broadcast_task = broadcast(payload)
+        try:
+            asyncio.run_coroutine_threadsafe(broadcast_task, loop)
+        except RuntimeError as exc:
+            broadcast_task.close()
+            print(f"❌ [WebSocket] Não foi possível encaminhar o pacote: {exc}")
 
 async def broadcast(message):
     if CONNECTED_CLIENTS:
         await asyncio.gather(*(client.send(message) for client in CONNECTED_CLIENTS), return_exceptions=True)
 
+
+def receiving_state_message():
+    return json.dumps({
+        "_gs_control": "receiving_state",
+        "enabled": receiving_enabled
+    })
+
+
 # --- WEBSOCKET SERVER ---
 async def ws_handler(websocket):
-    global flight_history, latest_packet
+    global flight_history, latest_packet, receiving_enabled
     CONNECTED_CLIENTS.add(websocket)
     try:
-        for past_packet in flight_history:
+        with receiver_state_lock:
+            state_message = receiving_state_message()
+            past_packets = list(flight_history)
+
+        await websocket.send(state_message)
+        for past_packet in past_packets:
             await websocket.send(past_packet)
             
         async for message in websocket:
             try:
                 data = json.loads(message)
-                if data.get("action") == "clear":
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
+                print(f"⚠️ [WebSocket] Comando inválido recebido: {exc}.")
+                continue
+
+            if not isinstance(data, dict):
+                print("⚠️ [WebSocket] Comando inválido: era esperado um objeto JSON.")
+                continue
+
+            if data.get("action") == "set_receiving":
+                enabled = data.get("enabled")
+                if not isinstance(enabled, bool):
+                    print("⚠️ [WebSocket] Estado de receção inválido; esperado true ou false.")
+                    continue
+
+                with receiver_state_lock:
+                    changed = receiving_enabled != enabled
+                    receiving_enabled = enabled
+                    state_message = receiving_state_message()
+
+                if changed:
+                    if enabled:
+                        print(
+                            "▶️ [UDP Receiver] Receção retomada. "
+                            f"Pacotes descartados durante pausas: {discarded_paused_packet_count}."
+                        )
+                    else:
+                        print(
+                            "⏸️ [UDP Receiver] Receção pausada. "
+                            f"CSV guardado em: {csv_filename} "
+                            f"({accepted_packet_count} pacotes válidos gravados até agora)."
+                        )
+                await broadcast(state_message)
+            elif data.get("action") == "clear":
+                with receiver_state_lock:
                     flight_history = []
                     latest_packet = None
-                    print("🗑️ [Server] Histórico de voo limpo a pedido do cliente.")
-            except Exception:
-                pass
+                print("🗑️ [Server] Histórico de voo limpo a pedido do cliente.")
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
@@ -106,6 +245,10 @@ HTML_CODE = r"""<!DOCTYPE html>
         .btn-img:hover { background: #7c3aed; }
         .btn-clear { background: #ef4444; color: white; }
         .btn-clear:hover { background: #dc2626; }
+        .btn-pause { background: #b45309; color: white; }
+        .btn-pause:hover { background: #92400e; }
+        .btn-resume { background: #16a34a; color: white; }
+        .btn-resume:hover { background: #15803d; }
         .btn-cancel { background: #64748b; color: white; }
         .btn-cancel:hover { background: #475569; }
         .btn-mode { background: #0ea5e9; color: white; }
@@ -224,6 +367,7 @@ HTML_CODE = r"""<!DOCTYPE html>
             <button class="btn btn-hab" id="btnHab" onclick="toggleHabPanel()">🌍 vs Terra</button>
             <button class="btn btn-export" onclick="downloadCSV()">📥 Exportar CSV</button>
             <button class="btn btn-img" onclick="downloadChartsAsImages()">📸 Baixar Gráficos (PNG)</button>
+            <button class="btn btn-pause" id="btnReceiving" onclick="toggleReceiving()" aria-pressed="false">⏸️ Pausar receção</button>
             <button class="btn btn-clear" onclick="openClearModal()">🗑️ Limpar Dados</button>
             <div id="status" class="status">AGUARDANDO DADOS...</div>
             <span id="modeBadge" class="mode-badge live">MODO LIVE</span>
@@ -362,6 +506,7 @@ HTML_CODE = r"""<!DOCTYPE html>
 
         // ---- Mode / Replay state ----
         let currentMode = 'live'; // 'live' | 'replay'
+        let receivingEnabled = true;
         let replayData = [];
         let replayIndex = 0;
         let replayPlaying = false;
@@ -640,12 +785,14 @@ HTML_CODE = r"""<!DOCTYPE html>
             const alt = data.altitude !== undefined ? parseFloat(data.altitude) : null;
             const tempo = data.tempo !== undefined ? parseFloat(data.tempo) : null;
             const paraFlag = data.paraquedas;
+            const previousAlt = lastAlt;
+            const previousTempo = lastTempo;
 
             // Vertical speed: prefer provided velocidade; else derive from altitude delta
             let vVert = v;
-            if ((vVert === null || isNaN(vVert)) && lastAlt !== null && lastTempo !== null && alt !== null && tempo !== null) {
-                const dt = tempo - lastTempo;
-                if (dt > 0) vVert = (alt - lastAlt) / dt;
+            if ((vVert === null || isNaN(vVert)) && previousAlt !== null && previousTempo !== null && alt !== null && tempo !== null) {
+                const dt = tempo - previousTempo;
+                if (dt > 0) vVert = (alt - previousAlt) / dt;
             }
             if (alt !== null) lastAlt = alt;
             if (tempo !== null) lastTempo = tempo;
@@ -667,7 +814,7 @@ HTML_CODE = r"""<!DOCTYPE html>
             // Convention: positive velocidade often means downward in many CanSat firmwares; we treat magnitude
             const speedDown = Math.abs(vVert);
             // Heuristic: if altitude increasing → ascent
-            const ascending = (lastAlt !== null && alt !== null && alt > lastAlt + 0.3) || (vVert > 0.5 && (data.estado || '').toLowerCase().includes('subi'));
+            const ascending = (previousAlt !== null && alt !== null && alt > previousAlt + 0.3) || (vVert > 0.5 && (data.estado || '').toLowerCase().includes('subi'));
 
             if (ascending || (data.estado || '').toLowerCase().match(/descol|ascent|subida|launch/)) {
                 dot.classList.add('yellow');
@@ -974,7 +1121,7 @@ HTML_CODE = r"""<!DOCTYPE html>
 
         // ========== Core packet handler (shared by live + replay) ==========
         function processPacket(data, fromReplay = false) {
-            if (!fromReplay && currentMode === 'replay') return; // ignore live while in replay
+            if (!fromReplay && (currentMode === 'replay' || !receivingEnabled)) return;
             if (!fromReplay) rawDataLog.push(data);
 
             document.getElementById('status').innerText = "ESTADO: " + (data.estado || "N/D");
@@ -1006,9 +1153,9 @@ HTML_CODE = r"""<!DOCTYPE html>
             });
 
             // FASE 1–3
+            updateGauges(data);
             updateParachute(data);
             updateWind(data);
-            updateGauges(data);
             updateHabitability(data);
 
             const fields = {
@@ -1052,6 +1199,32 @@ HTML_CODE = r"""<!DOCTYPE html>
         // ========== WebSocket (LIVE) ==========
         const ws = new WebSocket("ws://" + window.location.hostname + ":8051");
 
+        function updateReceivingState(enabled) {
+            receivingEnabled = enabled;
+            const button = document.getElementById('btnReceiving');
+            button.textContent = enabled ? '⏸️ Pausar receção' : '▶️ Retomar receção';
+            button.className = `btn ${enabled ? 'btn-pause' : 'btn-resume'}`;
+            button.setAttribute('aria-pressed', String(!enabled));
+
+            if (!enabled) {
+                document.getElementById('status').innerText =
+                    'RECEÇÃO PAUSADA — CSV guardado automaticamente; pacotes enviados durante a pausa são descartados.';
+            } else if (currentMode === 'live') {
+                document.getElementById('status').innerText = 'RECEÇÃO ATIVA — aguardando telemetria…';
+            }
+        }
+
+        function toggleReceiving() {
+            if (ws.readyState !== WebSocket.OPEN) {
+                document.getElementById('status').innerText = 'SEM LIGAÇÃO À GROUND STATION';
+                return;
+            }
+            ws.send(JSON.stringify({
+                action: 'set_receiving',
+                enabled: !receivingEnabled
+            }));
+        }
+
         ws.onopen = () => {
             if (currentMode === 'live') {
                 document.getElementById('status').innerText = "CONECTADO À GROUND STATION";
@@ -1061,8 +1234,14 @@ HTML_CODE = r"""<!DOCTYPE html>
         ws.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
+                if (data && data._gs_control === 'receiving_state') {
+                    updateReceivingState(data.enabled);
+                    return;
+                }
                 processPacket(data, false);
-            } catch(e) {}
+            } catch(e) {
+                console.error('Mensagem inválida recebida da Ground Station:', e);
+            }
         };
 
         // ========== FASE 4: Replay ==========

@@ -88,6 +88,16 @@ No PowerShell, na pasta do projeto, executa:
 - Servidores iniciados: UDP (5005), WebSocket (8051) e Web (8050).
 - Acede no navegador web ao endereco: http://127.0.0.1:8050
 - Mantem este terminal aberto.
+- O botao "Pausar rececao" suspende o processamento dos pacotes UDP:
+  os graficos ficam parados e os pacotes enviados durante a pausa sao
+  descartados. Os pacotes aceites sao gravados automaticamente no CSV;
+  "Retomar rececao" continua a gravar no mesmo ficheiro.
+- O historico em memoria e limitado aos 2000 pacotes mais recentes para
+  replay ao ligar o painel; o CSV continua a guardar todos os pacotes
+  validos recebidos durante a sessao.
+- A GS rejeita pacotes que nao sejam objetos JSON UTF-8 validos, que nao
+  incluam id, tempo, estado e altitude, ou que tenham tipos numericos
+  invalidos. O motivo do descarte aparece neste terminal.
 
 PASSO 2: Compilar e Iniciar o Simulador (Terminal 2 - PowerShell/CMD)
 ----------------------------------------------------------------------
