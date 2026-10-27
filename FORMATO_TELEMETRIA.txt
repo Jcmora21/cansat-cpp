@@ -1,0 +1,3 @@
+{"id":null,"tempo":null,"estado":null,"altitude":null,"velocidade":null,"forca_g":null,"aceleracao":null,"temperatura":null,"humidade":null,"pressao":null,"eco2":null,"tvoc":null,"uv":null,"lux":null,"paraquedas":null,"acc_x":null,"acc_y":null,"acc_z":null,"gyro_x":null,"gyro_y":null,"gyro_z":null,"pitch":null,"roll":null,"yaw":null,"rssi":null,"snr":null,"packet_loss":null}
+
+{"id":123,"tempo":24.6,"estado":"SUBIDA","altitude":152.35,"velocidade":32.1,"forca_g":3.4,"aceleracao":23.7,"temperatura":18.2,"humidade":55.0,"pressao":995.8,"eco2":415,"tvoc":10,"uv":3.7,"lux":43800,"paraquedas":false,"acc_x":0.02,"acc_y":-0.01,"acc_z":2.4,"gyro_x":0.1,"gyro_y":-0.2,"gyro_z":120.0,"pitch":88.2,"roll":135.0,"yaw":45.0,"rssi":-78.5,"snr":9.4,"packet_loss":0.0}
