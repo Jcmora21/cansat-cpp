@@ -201,18 +201,18 @@ async def ws_handler(websocket):
                     receiving_enabled = enabled
                     state_message = receiving_state_message()
 
-                if changed:
-                    if enabled:
-                        print(
-                            "▶️ [UDP Receiver] Receção retomada. "
-                            f"Pacotes descartados durante pausas: {discarded_paused_packet_count}."
-                        )
-                    else:
-                        print(
-                            "⏸️ [UDP Receiver] Receção pausada. "
-                            f"CSV guardado em: {csv_filename} "
-                            f"({accepted_packet_count} pacotes válidos gravados até agora)."
-                        )
+                if changed and enabled:
+                    print(
+                        "▶️ [UDP Receiver] Receção retomada. "
+                        f"Pacotes descartados durante pausas: {discarded_paused_packet_count}."
+                    )
+                elif changed:
+                    print(
+                        "⏸️ [UDP Receiver] Receção pausada. "
+                        f"CSV guardado em: {csv_filename} "
+                        f"({accepted_packet_count} pacotes válidos gravados; "
+                        f"{discarded_paused_packet_count} descartados durante pausas)."
+                    )
                 await broadcast(state_message)
             elif data.get("action") == "clear":
                 with receiver_state_lock:
