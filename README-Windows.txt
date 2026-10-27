@@ -27,6 +27,7 @@ em tempo real de um projeto CanSat/Minifoguete.
 
 cansat-cpp\
 ├── groundstation_clean.py   # Servidor HTTP/WebSocket da Ground Station
+├── iniciar_cansat.bat       # Compila e inicia a GS e o simulador
 ├── guardar.bat             # Script auxiliar para automacao (Windows)
 ├── dados_voo\              # Pasta onde sao gravados os ficheiros .csv
 └── simulador\
@@ -61,6 +62,21 @@ Se for necessario criar um ambiente virtual (venv):
 --------------------------------------------------------------------
 
 A Estacao de Solo deve ser SEMPRE iniciada antes do Simulador.
+
+Opcao automatica (recomendada):
+  Na pasta principal do projeto, faz duplo clique em iniciar_cansat.bat
+  ou executa no PowerShell:
+    .\iniciar_cansat.bat
+
+O script verifica Python e a dependencia websockets, compila o simulador,
+abre a Ground Station numa janela separada e abre o painel no navegador.
+Quando a GS estiver pronta e o painel aberto, prime qualquer tecla na
+janela do script para iniciar o simulador.
+
+Para parar, prime Ctrl+C na janela do simulador e depois Ctrl+C na janela
+da Ground Station.
+
+Execucao manual:
 
 PASSO 1: Iniciar a Estacao de Solo (Terminal 1 - PowerShell/CMD)
 -----------------------------------------------------------------
