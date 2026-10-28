@@ -18,13 +18,16 @@ ACKs e retransmissoes.
 - Metricas de Voo e KPIs: Exibicao automatica dos valores Minimo,
   Maximo e Media no topo de cada grafico.
 - Gravacao Automatica em CSV: Salvamento instantaneo dos pacotes na
-  pasta dados_voo\.
+  pasta dados_voo\. Termina 30 segundos depois de todos os CanSats
+  detetados reportarem aterragem (estado SOLO e altitude ate 0,1 m).
 - Pausa da captura: suspende graficos e CSV, mas mantem a rececao,
   validacao e os ACKs ativos. Os pacotes recebidos durante a pausa
   nao sao guardados.
 - Historico limitado a 2000 amostras para controlar o uso de memoria.
-- Exportacao de Dados: Descarga direta do historico em .csv ou
-  captura em imagem .png dos graficos.
+- Depois do fim da gravacao automatica, a telemetria continua visivel.
+  Em modo LIVE, Exportar CSV descarrega o ficheiro completo da sessao.
+- Exportacao de Dados em modo replay: CSV/ZIP; captura em imagem .png
+  dos graficos.
 
 --------------------------------------------------------------------
 2. ESTRUTURA DO PROJETO
@@ -95,6 +98,9 @@ Para controlo manual, tambem podes iniciar a GS com:
 - Acompanha os graficos em tempo real no navegador.
 - O botao "Pausar captura" suspende graficos e CSV sem interromper os ACKs;
   "Retomar captura" reativa a captura.
+- A gravacao automatica termina 30 segundos depois de todos os CanSats
+  detetados reportarem estado SOLO e altitude ate 0,1 m. A visualizacao
+  continua; "Exportar CSV" em modo LIVE guarda o CSV completo da sessao.
 
 Para usar APC220, liga o adaptador USB-serial e indica a porta COM e o
 baudrate configurado nos modulos, por exemplo:

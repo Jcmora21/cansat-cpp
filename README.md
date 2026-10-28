@@ -7,10 +7,11 @@ Este repositório contém uma Ground Station para telemetria de **um ou vários 
 - Painel Web em tempo real com gráficos, estado de voo, indicadores e vista geral ou individual por CanSat.
 - Protocolo CANSAT-TLM v1, com validação dos campos e CRC32, ACKs, identificação de pacotes duplicados/perdidos e estado de ligação.
 - Compatibilidade com um CanSat ou vários. O simulador incluído gera cinco CanSats; a GS não exige que todos estejam ativos.
-- Gravação automática em CSV, incluindo `cansat_id`, em `dados_voo/`.
+- Gravação automática em CSV, incluindo `cansat_id`, em `dados_voo/`; termina 30 segundos depois de todos os CanSats detetados reportarem aterragem (`SOLO` e altitude até 0,1 m).
+- Depois de a gravação automática terminar, a receção e a visualização da telemetria continuam. Em modo LIVE, **Exportar CSV** descarrega o ficheiro completo da sessão, sem o limite do histórico visual.
 - Botão **Pausar captura**: deixa de atualizar gráficos e CSV, mas continua a receber, validar e confirmar os pacotes com ACK. Os pacotes recebidos durante a pausa são descartados.
 - Históricos de voo e gráficos limitados a 2000 amostras em memória.
-- Exportação de CSV/ZIP e de gráficos PNG; modo replay a partir de CSV.
+- Exportação do CSV completo em modo LIVE, CSV/ZIP em modo replay e gráficos PNG; modo replay a partir de CSV.
 - Transporte UDP e variante serial para APC220.
 
 ## Campos do pacote de telemetria
@@ -166,6 +167,7 @@ Substitui a porta e o baudrate pelos valores do teu adaptador e dos módulos. No
 ## Captura, dados e encerramento
 
 - **Pausar captura** interrompe os gráficos e a gravação CSV. A GS continua a receber e a enviar ACKs, mas não guarda os pacotes recebidos enquanto está pausada. **Retomar captura** reativa a gravação.
+- Em modo LIVE, a gravação automática termina 30 segundos depois de todos os CanSats detetados reportarem estado `SOLO` e altitude igual ou inferior a 0,1 m. A GS continua a receber e a mostrar telemetria; **Exportar CSV** descarrega o ficheiro completo gravado na sessão.
 - Os ficheiros da sessão são criados em `dados_voo/` com nomes como `voo_cansat_AAAA-MM-DD_HH-MM-SS.csv`. Cada linha inclui `cansat_id`; os ficheiros antigos sem essa coluna continuam a poder ser carregados no replay.
 - Prime `Ctrl+C` no terminal do simulador para o parar e, depois, no terminal da GS.
 - O formato do pacote e um exemplo com CRC32 estão em [FORMATO_TELEMETRIA.txt](FORMATO_TELEMETRIA.txt).

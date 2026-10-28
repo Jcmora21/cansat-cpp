@@ -37,6 +37,7 @@ peer_addresses = {}
 cansats_lock = threading.RLock()
 capture_state_lock = threading.RLock()
 capture_enabled = True
+csv_logging_enabled = True
 discarded_while_paused = 0
 MAX_FLIGHT_HISTORY = 2000
 
@@ -221,6 +222,8 @@ def new_cansat_state():
     return {
         "latest": None,
         "history": [],
+        "has_telemetry": False,
+        "landed_at": None,
         "last_received": time.time(),
         "status": "ONLINE",
         "last_sequence": None,
@@ -236,6 +239,60 @@ def new_cansat_state():
         "duplicate_packets": 0,
         "received_packets": 0,
     }
+
+
+def update_auto_csv_logging(parsed):
+    global csv_logging_enabled
+
+    cansat_id = parsed.get("cansat_id")
+    altitude = parsed.get("altitude")
+    state = parsed.get("estado")
+    landed_states = {"SOLO", "LANDED", "ATERRADO", "ATERRAGEM"}
+
+    if (
+        cansat_id is None
+        or not is_finite_number(altitude)
+        or not isinstance(state, str)
+    ):
+        return
+
+    now = time.time()
+    is_landed = state.strip().upper() in landed_states and altitude <= 0.1
+    with cansats_lock:
+        cansat = get_cansat_state(cansat_id)
+        cansat["has_telemetry"] = True
+        if is_landed and cansat["landed_at"] is None:
+            cansat["landed_at"] = now
+            print(f"[Logger] CanSat {cansat_id} aterrou; a aguardar 30 segundos.")
+
+        active_cansats = [
+            item for item in cansats.values() if item["has_telemetry"]
+        ]
+        all_cansats_landed = bool(active_cansats) and all(
+            item["landed_at"] is not None for item in active_cansats
+        )
+        last_landing = max(
+            (
+                item["landed_at"]
+                for item in active_cansats
+                if item["landed_at"] is not None
+            ),
+            default=None,
+        )
+
+    if not all_cansats_landed or last_landing is None or now - last_landing < 30:
+        return
+
+    with capture_state_lock:
+        if not csv_logging_enabled:
+            return
+        csv_logging_enabled = False
+
+    print("[Logger] Gravacao automatica CSV terminada; telemetria continua ativa.")
+    emit_event({
+        "type": "csv_logging_state",
+        "enabled": False,
+    })
 
 
 def get_cansat_state(cansat_id):
@@ -337,6 +394,7 @@ def receiving_state_event():
             "type": "receiver_state",
             "enabled": capture_enabled,
             "discarded_while_paused": discarded_while_paused,
+            "csv_logging_enabled": csv_logging_enabled,
         }
 
 
@@ -600,6 +658,7 @@ def transport_receiver(transport_factory=UDPTransport):
 
                 parsed["packet_status"] = "received"
 
+        update_auto_csv_logging(parsed)
         normalized_payload = json.dumps(parsed, separators=(",", ":"), allow_nan=False)
 
         try:
@@ -608,9 +667,10 @@ def transport_receiver(transport_factory=UDPTransport):
                     discarded_while_paused += 1
                     continue
 
-                row = [parsed.get(header, "") for header in csv_headers]
-                with open(csv_filename, mode="a", newline="", encoding="utf-8") as file:
-                    csv.writer(file).writerow(row)
+                if csv_logging_enabled:
+                    row = [parsed.get(header, "") for header in csv_headers]
+                    with open(csv_filename, mode="a", newline="", encoding="utf-8") as file:
+                        csv.writer(file).writerow(row)
 
                 if cansat_id is not None:
                     with cansats_lock:
@@ -671,13 +731,15 @@ def check_cansat_status():
 
 async def broadcast(message):
     if CONNECTED_CLIENTS:
+        clients = tuple(CONNECTED_CLIENTS)
         results = await asyncio.gather(
-            *(client.send(message) for client in tuple(CONNECTED_CLIENTS)),
+            *(client.send(message) for client in clients),
             return_exceptions=True,
         )
-        for result in results:
+        for client, result in zip(clients, results):
             if isinstance(result, Exception):
                 print(f"[WebSocket] Falha ao enviar evento: {result}")
+                CONNECTED_CLIENTS.discard(client)
 
 
 # --- WEBSOCKET SERVER ---
@@ -729,7 +791,7 @@ async def ws_handler(websocket):
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
-        CONNECTED_CLIENTS.remove(websocket)
+        CONNECTED_CLIENTS.discard(websocket)
 
 
 # --- SERVIDOR WEB HTTP ---
@@ -875,6 +937,7 @@ HTML_CODE = r"""<!DOCTYPE html>
             <button class="btn btn-cancel" id="btnCapture" onclick="toggleCapture()">⏸️ Pausar captura</button>
             <button class="btn btn-clear" onclick="openClearModal()">🗑️ Limpar Dados</button>
             <div id="status" class="status">AGUARDANDO DADOS...</div>
+            <div id="csvStatus" class="status">CSV automático ativo</div>
             <span id="modeBadge" class="mode-badge live">MODO LIVE</span>
         </div>
     </div>
@@ -2073,6 +2136,18 @@ function rebuildChartsForGeneral() {
     });
 }
 
+let generalChartsUpdatePending = false;
+
+function scheduleGeneralChartsRebuild() {
+    if (generalChartsUpdatePending) return;
+
+    generalChartsUpdatePending = true;
+    requestAnimationFrame(() => {
+        generalChartsUpdatePending = false;
+        rebuildChartsForGeneral();
+    });
+}
+
 function selectCansatFromCheckbox(id, checked) {
     if (checked) {
         document.querySelectorAll('.cansat-selector').forEach(box => {
@@ -2239,8 +2314,8 @@ function selectCansat(id) {
 
             if (selectedCansat === null) {
                 // Modo Geral:
-                // reconstruir os gráficos com todos os CanSats
-                rebuildChartsForGeneral();
+                // agrupar várias atualizações para não bloquear o WebSocket.
+                scheduleGeneralChartsRebuild();
 
             } else if (data.cansat_id === selectedCansat) {
 
@@ -2324,11 +2399,14 @@ function selectCansat(id) {
 
                 if (message.type === "receiver_state") {
                     updateCaptureButton(message.enabled, message.discarded_while_paused);
+                    updateCsvLoggingStatus(message.csv_logging_enabled);
                     if (currentMode === 'live') {
                         document.getElementById('status').innerText = message.enabled
                             ? "Captura ativa."
                             : `Captura pausada — ${message.discarded_while_paused} pacotes descartados (ACKs ativos).`;
                     }
+                } else if (message.type === "csv_logging_state") {
+                    updateCsvLoggingStatus(message.enabled);
                 } else if (message.type === "telemetry") {
                     const data = message.data;
 
@@ -2458,6 +2536,13 @@ function selectCansat(id) {
             button.title = enabled
                 ? 'Pausar gráficos e gravação CSV (os ACKs continuam ativos)'
                 : `${discarded} pacotes recebidos durante a pausa não foram guardados`;
+        }
+
+        function updateCsvLoggingStatus(enabled) {
+            const status = document.getElementById('csvStatus');
+            status.textContent = enabled
+                ? 'CSV automático ativo'
+                : 'CSV automático terminado — telemetria continua';
         }
 
         function parseCSV(text) {
@@ -2661,6 +2746,33 @@ function selectCansat(id) {
 
         // ========== Export / Clear ==========
         async function downloadCSV() {
+            if (currentMode === 'live') {
+                try {
+                    const response = await fetch('/download_csv');
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+
+                    const blob = await response.blob();
+                    const disposition = response.headers.get('Content-Disposition') || '';
+                    const filename = disposition.match(/filename="([^"]+)"/i)?.[1]
+                        || 'voo_cansat.csv';
+                    const url = window.URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = filename;
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                    window.URL.revokeObjectURL(url);
+                    return true;
+                } catch (error) {
+                    console.error("Erro ao descarregar o CSV completo:", error);
+                    alert("Não foi possível descarregar o CSV completo da Ground Station.");
+                    return false;
+                }
+            }
+
             if (rawDataLog.length === 0 && currentMode === 'live') {
                 alert("Não existem dados acumulados para exportar.");
                 return;
@@ -2804,6 +2916,7 @@ function selectCansat(id) {
             window.URL.revokeObjectURL(url);
 
             console.log(`📦 Voo exportado: ${folderName}`);
+            return true;
         }
 
         async function downloadChartsAsImages() {
@@ -2881,7 +2994,8 @@ function selectCansat(id) {
 
         function confirmClear(shouldDownload) {
             if (shouldDownload) {
-                downloadCSV().then(() => {
+                downloadCSV().then((downloaded) => {
+                    if (downloaded === false) return;
                     clearDashboard();
                     closeClearModal();
                 }).catch((error) => {
@@ -2972,6 +3086,31 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 class SimpleHTTPHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/download_csv":
+            try:
+                with capture_state_lock:
+                    with open(csv_filename, "rb") as file:
+                        contents = file.read()
+            except FileNotFoundError:
+                self.send_error(404, "CSV de voo nao encontrado")
+                return
+            except OSError as error:
+                print(f"[Logger] Falha ao preparar o CSV para exportacao: {error}")
+                self.send_error(500, "Nao foi possivel ler o CSV de voo")
+                return
+
+            filename = os.path.basename(csv_filename)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="{filename}"',
+            )
+            self.send_header("Content-Length", str(len(contents)))
+            self.end_headers()
+            self.wfile.write(contents)
+            return
+
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
@@ -3003,7 +3142,13 @@ async def main(transport_factory=UDPTransport):
     threading.Thread(target=run_http_server, daemon=True).start()
 
     print("🚀 [WebSocket Server] Ativo na porta 8051...")
-    async with websockets.serve(ws_handler, "127.0.0.1", 8051):
+    async with websockets.serve(
+        ws_handler,
+        "127.0.0.1",
+        8051,
+        ping_interval=20,
+        ping_timeout=60,
+    ):
         await asyncio.Future()
 
 
