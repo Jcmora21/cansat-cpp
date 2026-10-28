@@ -76,14 +76,13 @@ cansat-cpp/
 ├── groundstation.py
 ├── groundstation_serial.py
 ├── FORMATO_TELEMETRIA.txt
-├── iniciar_cansat.bat
+├── iniciar_gs.bat
 ├── README.md
 ├── README-Linux.txt
 ├── README-Windows.txt
 └── simulador/
     ├── simulador.cpp
     ├── compilar.sh
-    ├── compilar.bat
     └── iniciar_simulador.bat
 ```
 
@@ -148,17 +147,11 @@ O simulador gera cinco CanSats. Um único CanSat compatível com CANSAT-TLM v1 t
 
 ## Executar em Windows
 
-O método automatizado recomendado é executar `iniciar_cansat.bat` na pasta do projeto. O script compila o simulador, inicia `groundstation.py`, abre o painel e pergunta se queres iniciar os cinco CanSats simulados.
+Para iniciar uma simulação, executa primeiro `iniciar_gs.bat` na pasta do projeto. O script inicia `groundstation.py` e abre o painel em <http://127.0.0.1:8050>. Depois, executa `simulador/iniciar_simulador.bat`; esse script compila o simulador e, se a compilação tiver sucesso, inicia os cinco CanSats.
 
-Para iniciar os componentes manualmente, executa `py -3 groundstation.py`; depois, num segundo terminal:
+O simulador deve ser iniciado depois da Ground Station. A janela do simulador permanece aberta enquanto a simulação corre; prime `Ctrl+C` nessa janela para a parar.
 
-```bat
-cd simulador
-compilar.bat
-iniciar_simulador.bat
-```
-
-`iniciar_simulador.bat` prepara o PATH das DLLs do MSYS2. A instalação padrão esperada é `C:\msys64`; se usares outra pasta, adiciona `ucrt64\bin` ao PATH do Windows.
+`iniciar_gs.bat` usa o ambiente virtual ativo ou o `.venv` do projeto, se existir. `iniciar_simulador.bat` prepara o PATH das DLLs do MSYS2. A instalação padrão esperada é `C:\msys64`; se usares outra pasta, adiciona `ucrt64\bin` ao PATH do Windows.
 
 ## APC220 (serial)
 

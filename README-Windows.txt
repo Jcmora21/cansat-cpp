@@ -33,13 +33,12 @@ ACKs e retransmissoes.
 cansat-cpp\
 ├── groundstation.py        # Ground Station UDP para um ou varios CanSats
 ├── groundstation_serial.py # A mesma GS atraves de serial/APC220
-├── iniciar_cansat.bat      # Compila, inicia a GS e pergunta quando iniciar o simulador
+├── iniciar_gs.bat          # Inicia a Ground Station e abre o painel Web
 ├── FORMATO_TELEMETRIA.txt  # Estrutura e exemplo CANSAT-TLM v1
 ├── dados_voo\              # CSV de cada sessao, com cansat_id
 └── simulador\
     ├── simulador.cpp       # Simulador multicansat com ACK/retransmissao
-    ├── compilar.bat        # Compilacao Windows (g++ / Winsock)
-    └── iniciar_simulador.bat # Arranque com as DLLs do MSYS2 no PATH
+    └── iniciar_simulador.bat # Compila e inicia; configura as DLLs do MSYS2
 
 --------------------------------------------------------------------
 3. REQUISITOS E DEPENDENCIAS (WINDOWS)
@@ -62,39 +61,33 @@ Se for necessario criar um ambiente virtual (venv):
   py -3 -m venv .venv
   .venv\Scripts\activate
   python -m pip install websockets
-O iniciar_cansat.bat usa o venv ativo ou .venv\ automaticamente, se existir.
+O iniciar_gs.bat usa o venv ativo ou .venv\ automaticamente, se existir.
 
 --------------------------------------------------------------------
 4. COMO EXECUTAR O SISTEMA
 --------------------------------------------------------------------
 
-A Ground Station deve estar ativa antes de iniciar o simulador. O ficheiro
-iniciar_cansat.bat compila o simulador, inicia groundstation.py, abre o painel
-e pergunta quando queres arrancar os cinco CanSats.
+A Ground Station deve estar ativa antes de iniciar o simulador. O arranque e
+feito em duas etapas: primeiro iniciar a GS e depois compilar/iniciar o
+simulador.
 
-Opcao automatica (recomendada), a partir da pasta do projeto:
-  iniciar_cansat.bat
+PASSO 1: Iniciar a Ground Station, a partir da pasta do projeto:
+  iniciar_gs.bat
 
-Para controlar cada etapa manualmente:
+O script abre uma janela para a GS e o painel Web em
+  http://127.0.0.1:8050
 
-PASSO 1: Iniciar a Estacao de Solo (Terminal 1 - PowerShell/CMD)
------------------------------------------------------------------
-Executa o comando:
+PASSO 2: Compilar e iniciar os cinco CanSats simulados:
+  simulador\iniciar_simulador.bat
+
+O script compila sempre simulador.cpp e so arranca a simulacao se a
+compilacao terminar com sucesso. A janela permanece aberta durante o voo.
+
+Para controlo manual, tambem podes iniciar a GS com:
   py -3 groundstation.py
 
-- Servidores iniciados: UDP (5005), WebSocket (8051) e Web (8050).
+- Servidores da GS: UDP (5005), WebSocket (8051) e Web (8050).
 - O UDP escuta apenas em 127.0.0.1; para APC220, usa a variante serial.
-- Acede no navegador web ao endereco: http://127.0.0.1:8050
-
-PASSO 2: Compilar e Iniciar o Simulador (Terminal 2 - PowerShell/CMD)
-----------------------------------------------------------------------
-Abre um segundo terminal e executa:
-  cd simulador
-  compilar.bat
-  iniciar_simulador.bat
-
-(O script de compilacao liga automaticamente a biblioteca Winsock -lws2_32.)
-
 - O simulador incluido gera cinco CanSats e envia os dados via UDP. A GS
   tambem funciona se apenas um CanSat compativel estiver a transmitir.
 - A Ground Station valida o CRC32, confirma cada pacote valido com ACK,
