@@ -1,0 +1,11 @@
+1. TSL2561 -> Intensidade Luminosa - (https://www.botnroll.com/pt/luz-imagem/3038-sensor-intensidade-luminosa-gy-2561-tls2561.html)
+
+2. BME680 -> Pressão, Humidade, Temperatura, Gás Butano - (https://www.adafruit.com/product/3660)
+
+3. SGP30 -> Gases - (https://www.adafruit.com/product/3709)
+
+4. HML5883L -> Bússola de 3 eixos - (https://www.botnroll.com/pt/bussolas/842-bussola-hmc5883l-3-eixos.html)
+
+5. GUVA-S12SD -> Luz UV - (https://www.botnroll.com/pt/luz-imagem/2360-sensor-uv-waveshare.html)
+
+6. HuskyLens 1 -> Câmera IA - (https://www.dfrobot.com/huskylens/huskylens)

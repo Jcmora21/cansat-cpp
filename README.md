@@ -13,6 +13,62 @@ Este repositório contém uma Ground Station para telemetria de **um ou vários 
 - Exportação de CSV/ZIP e de gráficos PNG; modo replay a partir de CSV.
 - Transporte UDP e variante serial para APC220.
 
+## Campos do pacote de telemetria
+
+A GS recebe pacotes **CANSAT-TLM v1** neste formato JSON. A tabela descreve
+o pacote que o CanSat (ou o simulador) envia, antes de a GS converter os nomes
+para uso interno no painel e no CSV. Os campos listados são os nomes exatos
+esperados no protocolo.
+
+Todos os campos de topo são obrigatórios. Dentro de `data`, todos os campos
+indicados são obrigatórios; em `link`, `rssi` e `snr` são obrigatórios e
+`packet_loss` é opcional para a GS. Os campos numéricos devem conter um número
+JSON finito (inteiro ou decimal); `parachute` tem de ser booleano. O campo
+`crc` também é necessário para a GS aceitar o pacote.
+
+| Campo | Descrição | Formato (tipo de valor) | Exemplo |
+|---|---|---|---|
+| `protocol` | Nome do protocolo. | Texto fixo | `"CANSAT-TLM"` |
+| `version` | Versão do protocolo. | Inteiro | `1` |
+| `type` | Tipo da mensagem. | Texto fixo | `"telemetry"` |
+| `cansat_id` | Identificador do CanSat. | Inteiro ≥ 0 | `2` |
+| `sequence` | Número sequencial do pacote desse CanSat. | Inteiro ≥ 0 | `123` |
+| `mission_time_ms` | Tempo de missão em milissegundos. | Inteiro ≥ 0 | `24600` |
+| `state` | Estado/fase atual do voo. | Texto não vazio | `"SUBIDA"` |
+| `data` | Objeto com medições dos sensores e estado do paraquedas. | Objeto JSON | `{...}` |
+| `link` | Objeto com métricas da ligação de rádio. | Objeto JSON | `{...}` |
+| `crc` | CRC32 do pacote sem este campo, calculado sobre JSON canónico (chaves ordenadas e sem espaços). | Texto hexadecimal, 1–8 caracteres | `"C891D935"` |
+| `data.altitude` | Altitude. O simulador expressa em metros. | Número finito | `152.35` |
+| `data.velocity` | Velocidade vertical. O simulador expressa em m/s. | Número finito | `32.1` |
+| `data.acceleration` | Aceleração. O simulador expressa em m/s². | Número finito | `23.7` |
+| `data.force_g` | Força específica / aceleração medida em unidades de g. | Número finito | `3.4` |
+| `data.temperature` | Temperatura. O simulador expressa em °C. | Número finito | `18.2` |
+| `data.humidity` | Humidade relativa. O simulador expressa em percentagem. | Número finito | `55.0` |
+| `data.pressure` | Pressão atmosférica. O simulador expressa em hPa. | Número finito | `995.8` |
+| `data.eco2` | Concentração equivalente de CO₂. O simulador expressa em ppm. | Número finito | `415` |
+| `data.tvoc` | Compostos orgânicos voláteis totais. O simulador expressa em ppb. | Número finito | `10` |
+| `data.uv` | Índice ultravioleta. | Número finito | `3.7` |
+| `data.lux` | Iluminância. O simulador expressa em lux. | Número finito | `43800` |
+| `data.acc_x` | Aceleração no eixo X do acelerómetro. | Número finito | `0.02` |
+| `data.acc_y` | Aceleração no eixo Y do acelerómetro. | Número finito | `-0.01` |
+| `data.acc_z` | Aceleração no eixo Z do acelerómetro. | Número finito | `2.4` |
+| `data.gyro_x` | Velocidade angular no eixo X do giroscópio. | Número finito | `0.1` |
+| `data.gyro_y` | Velocidade angular no eixo Y do giroscópio. | Número finito | `-0.2` |
+| `data.gyro_z` | Velocidade angular no eixo Z do giroscópio. | Número finito | `120.0` |
+| `data.pitch` | Atitude de arfagem. O simulador expressa em graus. | Número finito | `88.2` |
+| `data.roll` | Atitude de rolamento. O simulador expressa em graus. | Número finito | `135.0` |
+| `data.yaw` | Atitude de guinada. O simulador expressa em graus. | Número finito | `45.0` |
+| `data.parachute` | Indica se o paraquedas está aberto. | Booleano (`true`/`false`) | `false` |
+| `link.rssi` | Potência do sinal recebido. O simulador expressa em dBm. | Número finito | `-78.5` |
+| `link.snr` | Relação sinal/ruído. O simulador expressa em dB. | Número finito | `9.4` |
+| `link.packet_loss` | Estimativa da perda de pacotes reportada pelo emissor. O simulador envia `0.0` ou `2.5`. | Número finito; opcional | `0.0` |
+
+`data` e `link` têm de ser objetos JSON com os respetivos campos, não texto
+contendo JSON. O CRC é calculado sobre o objeto completo sem `crc`; a
+representação usada para o cálculo ordena as chaves e remove espaços, e o
+resultado é transmitido como hexadecimal. O ficheiro
+[FORMATO_TELEMETRIA.txt](FORMATO_TELEMETRIA.txt) contém pacotes de exemplo.
+
 ## Estrutura
 
 ```text
