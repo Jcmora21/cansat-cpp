@@ -1,4 +1,3 @@
-#include <arpa/inet.h>
 #include <algorithm>
 #include <cerrno>
 #include <cctype>
@@ -14,12 +13,60 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <sys/socket.h>
-#include <sys/select.h>
 #include <thread>
-#include <unistd.h>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+using SocketHandle = SOCKET;
+using SocketLength = int;
+using SocketResult = int;
+
+class SocketRuntime {
+public:
+  int initialize() {
+    WSADATA data{};
+    const int result = WSAStartup(MAKEWORD(2, 2), &data);
+    initialized_ = result == 0;
+    return result;
+  }
+
+  ~SocketRuntime() {
+    if (initialized_) {
+      WSACleanup();
+    }
+  }
+
+private:
+  bool initialized_ = false;
+};
+
+int socket_error() { return WSAGetLastError(); }
+bool socket_interrupted() { return WSAGetLastError() == WSAEINTR; }
+void close_socket(SocketHandle socket) { closesocket(socket); }
+#else
+#include <arpa/inet.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
+using SocketHandle = int;
+using SocketLength = socklen_t;
+using SocketResult = ssize_t;
+
+class SocketRuntime {
+public:
+  int initialize() { return 0; }
+};
+
+int socket_error() { return errno; }
+bool socket_interrupted() { return errno == EINTR; }
+void close_socket(SocketHandle socket) { close(socket); }
+#endif
 
 using json = nlohmann::json;
 
@@ -148,6 +195,21 @@ std::string format_crc(uint32_t checksum) {
   return stream.str();
 }
 
+void send_udp(SocketHandle socket, const std::string &payload,
+              const sockaddr_in &destination, SocketLength destination_length) {
+  const int result = sendto(
+      socket, payload.c_str(), static_cast<int>(payload.size()), 0,
+      reinterpret_cast<const sockaddr *>(&destination), destination_length);
+#ifdef _WIN32
+  if (result == SOCKET_ERROR) {
+#else
+  if (result < 0) {
+#endif
+    std::cerr << "Falha ao enviar datagrama UDP: erro " << socket_error()
+              << '\n';
+  }
+}
+
 json protect_message(json message) {
   message.erase("crc");
   message["crc"] = format_crc(crc32(canonical_json(message)));
@@ -225,7 +287,7 @@ bool is_selected_sequence(int interval, int sequence) {
   return interval > 0 && sequence % interval == 0;
 }
 
-void send_pending_packet(int sock, const sockaddr_in &destination,
+void send_pending_packet(SocketHandle sock, const sockaddr_in &destination,
                          CanSat &cansat, int sequence,
                          const SimulationOptions &options,
                          bool first_attempt) {
@@ -244,40 +306,54 @@ void send_pending_packet(int sock, const sockaddr_in &destination,
   }
 
   const std::string &payload = pending.payload;
-  sendto(sock, payload.c_str(), payload.size(), 0,
-         reinterpret_cast<const sockaddr *>(&destination), sizeof(destination));
+  send_udp(sock, payload, destination, sizeof(destination));
 
   if (first_attempt &&
       is_selected_sequence(options.duplicate_every, sequence)) {
-    sendto(sock, payload.c_str(), payload.size(), 0,
-           reinterpret_cast<const sockaddr *>(&destination),
-           sizeof(destination));
+    send_udp(sock, payload, destination, sizeof(destination));
     std::cout << "[Teste] duplicado enviado: CanSat " << cansat.cansat_id
               << " seq=" << sequence << '\n';
   }
 }
 
-void process_incoming_messages(int sock, std::vector<CanSat> &cansats) {
+void process_incoming_messages(SocketHandle sock, std::vector<CanSat> &cansats) {
   while (true) {
     fd_set read_set;
     FD_ZERO(&read_set);
     FD_SET(sock, &read_set);
     timeval timeout{};
+#ifdef _WIN32
+    const int ready = select(0, &read_set, nullptr, nullptr, &timeout);
+#else
     const int ready = select(sock + 1, &read_set, nullptr, nullptr, &timeout);
-    if (ready <= 0) {
-      if (ready < 0 && errno == EINTR) {
+#endif
+    if (ready < 0) {
+      if (socket_interrupted()) {
         continue;
       }
+      std::cerr << "Falha no select UDP: erro " << socket_error() << '\n';
+      return;
+    }
+    if (ready == 0) {
       return;
     }
 
     char buffer[4096];
     sockaddr_in source{};
-    socklen_t source_length = sizeof(source);
-    const ssize_t received = recvfrom(
+    SocketLength source_length = sizeof(source);
+    const SocketResult received = recvfrom(
         sock, buffer, sizeof(buffer), 0,
         reinterpret_cast<sockaddr *>(&source), &source_length);
-    if (received <= 0) {
+#ifdef _WIN32
+    if (received == SOCKET_ERROR) {
+#else
+    if (received < 0) {
+#endif
+      std::cerr << "Falha ao receber datagrama UDP: erro " << socket_error()
+                << '\n';
+      return;
+    }
+    if (received == 0) {
       continue;
     }
 
@@ -330,8 +406,7 @@ void process_incoming_messages(int sock, std::vector<CanSat> &cansats) {
             {"status", "received"},
         });
         const std::string response_payload = response.dump();
-        sendto(sock, response_payload.c_str(), response_payload.size(), 0,
-               reinterpret_cast<const sockaddr *>(&source), source_length);
+        send_udp(sock, response_payload, source, source_length);
         std::cout << "Comando recebido: CanSat " << cansat_id << " -> "
                   << command << '\n';
       }
@@ -341,7 +416,7 @@ void process_incoming_messages(int sock, std::vector<CanSat> &cansats) {
   }
 }
 
-void retry_or_expire_packets(int sock, const sockaddr_in &destination,
+void retry_or_expire_packets(SocketHandle sock, const sockaddr_in &destination,
                              std::vector<CanSat> &cansats,
                              const SimulationOptions &options) {
   const auto now = std::chrono::steady_clock::now();
@@ -409,10 +484,18 @@ int main(int argc, char **argv) {
   // SOCKET UDP
   // ========================================================
 
-  int sock = socket(AF_INET, SOCK_DGRAM, 0);
+  SocketRuntime socket_runtime;
+  const int startup_result = socket_runtime.initialize();
+  if (startup_result != 0) {
+    std::cerr << "Falha ao inicializar sockets: erro " << startup_result
+              << '\n';
+    return 1;
+  }
 
-  if (sock < 0) {
-    std::cerr << "Erro ao criar socket UDP\n";
+  SocketHandle sock = socket(AF_INET, SOCK_DGRAM, 0);
+
+  if (sock == static_cast<SocketHandle>(-1)) {
+    std::cerr << "Erro ao criar socket UDP: " << socket_error() << '\n';
     return 1;
   }
 
@@ -422,8 +505,9 @@ int main(int argc, char **argv) {
   localAddr.sin_port = htons(0);
   if (bind(sock, reinterpret_cast<const sockaddr *>(&localAddr),
            sizeof(localAddr)) < 0) {
-    std::cerr << "Erro ao associar socket UDP local\n";
-    close(sock);
+    std::cerr << "Erro ao associar socket UDP local: " << socket_error()
+              << '\n';
+    close_socket(sock);
     return 1;
   }
 
@@ -435,7 +519,7 @@ int main(int argc, char **argv) {
   if (inet_pton(AF_INET, "127.0.0.1", &destAddr.sin_addr) <= 0) {
 
     std::cerr << "Erro ao configurar endereço UDP\n";
-    close(sock);
+    close_socket(sock);
     return 1;
   }
 
@@ -827,7 +911,7 @@ int main(int argc, char **argv) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
-  close(sock);
+  close_socket(sock);
 
   return 0;
 }

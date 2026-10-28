@@ -2,9 +2,9 @@
                CANSAT GROUND STATION & SIMULATOR
 ====================================================================
 
-Este projeto contem a Estacao de Solo (Ground Station) e o Simulador
-de Voo desenvolvidos em Python e C++ para monitorizacao de telemetria
-em tempo real de um projeto CanSat/Minifoguete.
+Este projeto contem a Ground Station multicansat e um simulador C++
+que representa cinco CanSats. A comunicacao usa CANSAT-TLM v1 sobre
+UDP em 127.0.0.1:5005, com CRC32, ACKs e retransmissoes.
 
 --------------------------------------------------------------------
 1. FUNCIONALIDADES
@@ -18,6 +18,9 @@ em tempo real de um projeto CanSat/Minifoguete.
   Maximo e Media no topo de cada grafico.
 - Gravacao Automatica em CSV: Salvamento instantaneo dos pacotes na
   pasta dados_voo/.
+- Botao para pausar/retomar a captura: os ACKs continuam ativos durante
+  a pausa, mas graficos e CSV ignoram os pacotes recebidos nesse periodo.
+- Historicos limitados a 2000 amostras.
 - Exportacao de Dados: Descarga direta do historico em .csv ou
   captura em imagem .png dos graficos.
 
@@ -26,8 +29,8 @@ em tempo real de um projeto CanSat/Minifoguete.
 --------------------------------------------------------------------
 
 cansat-cpp/
-├── groundstation_clean.py   # Servidor HTTP/WebSocket da Ground Station
-├── guardar.sh              # Script auxiliar para automacao
+├── groundstation.py         # Ground Station multicansat UDP
+├── groundstation_serial.py # Variante serial/APC220 da mesma GS
 ├── entrar.sh               # Script de inicializacao Termux/Ubuntu
 ├── dados_voo/              # Pasta onde sao gravados os ficheiros .csv
 └── simulador/
@@ -43,8 +46,9 @@ No ambiente Linux/Ubuntu (via Termux/PROOT), garante as dependencias:
 - Python 3 (com a biblioteca websockets):
   pip install websockets
 
-- Compilador C++ (g++):
-  apt update && apt install g++ -y
+- Compilador C++ (g++) e cabecalhos nlohmann-json:
+  sudo apt update && sudo apt install g++ nlohmann-json3-dev -y
+  No Termux: pkg install g++ nlohmann-json
 
 - Se for necessario criar um ambiente virtual (venv):
   [No Termux]: pkg install python python-pip
@@ -63,7 +67,7 @@ A Estacao de Solo deve ser SEMPRE iniciada antes do Simulador.
 PASSO 1: Iniciar a Estacao de Solo (Terminal 1)
 -----------------------------------------------
 Executa o comando:
-  python3 groundstation_clean.py
+  python3 groundstation.py
 
 - Servidores iniciados: UDP (5005), WebSocket (8051) e Web (8050).
 - Acede no navegador web ao endereco: http://127.0.0.1:8050
@@ -76,7 +80,11 @@ Abre um segundo terminal e executa:
   ./simulador
 
 - O simulador gera os dados e envia-os via UDP para a Ground Station.
+- A GS valida CRC32 e campos, confirma pacotes validos com ACK e guarda o
+  identificador cansat_id no CSV.
 - Acompanha os graficos em tempo real no navegador.
+- Usa o botao "Pausar captura" para suspender graficos/CSV sem parar os ACKs;
+  "Retomar captura" reativa a captura.
 
 --------------------------------------------------------------------
 5. COMO PARAR A EXECUCAO
@@ -99,4 +107,5 @@ Abre um segundo terminal e executa:
 --------------------------------------------------------------------
 
 - Ficheiros gerados no formato: voo_cansat_AAAA-MM-DD_HH-MM-SS.csv
+- Cada linha inclui cansat_id para distinguir os dados dos cinco CanSats.
 - Pasta de destino: ~/cansat-cpp/dados_voo/

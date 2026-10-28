@@ -4,6 +4,7 @@ pip/
 moc_*
 groundstation
 simulador/simulador
+simulador/simulador.exe
 estacao/estacao
 dados_voo/
 dados_voo/

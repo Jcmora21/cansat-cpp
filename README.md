@@ -10,6 +10,9 @@ Este repositório contém a **Estação de Solo (Ground Station)** e o **Simulad
 * **Gestão Inteligente de Fases de Voo:** Deteção de transições de estado (*Espera*, *Subida*, *Apogeu*, *Descida*) com etiquetagem automática e sobreposição inteligente de rótulos na mesma linha vertical.
 * **Métricas de Voo e KPIs:** Exibição automática dos valores Mínimo, Máximo e Média no topo de cada gráfico, com painel completo de telemetria em tempo real.
 * **Gravação Automática em CSV:** Salvamento instantâneo (*append mode*) de todos os pacotes recebidos na pasta `dados_voo/`, garantindo a persistência contra falhas do sistema.
+* **Suporte multicansat:** A GS identifica os cinco CanSats, valida pacotes CANSAT-TLM v1 com CRC32, confirma pacotes válidos com ACK e regista `cansat_id` no CSV.
+* **Pausa da captura:** O botão **Pausar captura** suspende os gráficos e o CSV, mas mantém a receção, a validação e os ACKs ativos; os pacotes recebidos durante a pausa são descartados.
+* **Memória limitada:** Históricos visuais e de voo limitados a 2000 amostras.
 * **Exportação de Dados:** Descarga direta do histórico em `.csv` ou captura em imagem `.png` de todos os gráficos combinados através do painel.
 
 ---
@@ -17,14 +20,18 @@ Este repositório contém a **Estação de Solo (Ground Station)** e o **Simulad
 ## 📁 Estrutura do Projeto
 
 cansat-cpp/
-├── groundstation.py         # Ground Station para testes UDP
+├── groundstation.py         # Ground Station multicansat UDP
 ├── groundstation_serial.py  # Ground Station via serial/APC220
+├── iniciar_cansat.bat       # Arranque Windows (GS + confirmação para iniciar simulador)
+├── FORMATO_TELEMETRIA.txt   # Formato e exemplo válido de pacote CANSAT-TLM
 ├── guardar.sh              # Script auxiliar para automação
 ├── entrar.sh               # Script de inicialização da ponte Termux/Ubuntu
 ├── dados_voo/              # Pasta onde são gravados os ficheiros de telemetria .csv
 └── simulador/
     ├── simulador.cpp       # Código-fonte do simulador de voo em C++
-    └── compilar.sh         # Script para compilação do simulador
+    ├── compilar.sh         # Script Linux para compilação do simulador
+    ├── compilar.bat        # Script Windows para compilação do simulador
+    └── iniciar_simulador.bat # Arranque Windows com as DLLs do MSYS2
 
 ---
 
@@ -41,7 +48,7 @@ pip install websockets pyserial
 * **Compilador C++ (g++)**:
 
 ```bash
-apt update && apt install g++ -y
+apt update && apt install g++ nlohmann-json3-dev -y
 ```
 ---
 
@@ -69,6 +76,13 @@ cd simulador
 ```
 * **O que acontece:** O simulador começa a gerar dados físicos de voo (altitude, velocidade, aceleração, pressão, sensores ambientais) e a enviá-los via UDP para a estação de solo.
 * **Visualização:** Acompanha os gráficos a serem desenhados em tempo real na página web.
+
+No Windows, instala `websockets` com `py -3 -m pip install websockets` e
+instala MSYS2 UCRT64 com g++ e nlohmann-json. A partir da pasta do projeto,
+executa `iniciar_cansat.bat`: compila o simulador, inicia `groundstation.py`,
+abre `http://127.0.0.1:8050` e pergunta quando iniciar os cinco CanSats.
+Para executar o simulador manualmente, usa `simulador/iniciar_simulador.bat`
+para também configurar as DLLs do MSYS2 no PATH.
 
 ### Ground Station com APC220
 
@@ -98,7 +112,7 @@ python3 groundstation.py
 5. **No Terminal 2:** Vai à pasta `simulador` e compila e executa `./simulador`.
 ```bash
 cd simulador/
-./compilar
+./compilar.sh
 ./simulador
 ```
 7. **Acompanhar o Voo:**

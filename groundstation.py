@@ -8,8 +8,16 @@ import csv
 import os
 import math
 import re
+import sys
 import zlib
+from collections import deque
 from datetime import datetime
+
+# Keep diagnostic output from terminating the Windows process on non-UTF-8 consoles.
+for output_stream in (sys.stdout, sys.stderr):
+    reconfigure = getattr(output_stream, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(errors="backslashreplace")
 
 # 📁 Criar pasta para logs
 LOG_DIR = "dados_voo"
@@ -27,9 +35,14 @@ CONNECTED_CLIENTS = set()
 transport = None
 peer_addresses = {}
 cansats_lock = threading.RLock()
+capture_state_lock = threading.RLock()
+capture_enabled = True
+discarded_while_paused = 0
+MAX_FLIGHT_HISTORY = 2000
 
 csv_headers = [
     "id",
+    "cansat_id",
     "tempo",
     "estado",
     "altitude",
@@ -105,6 +118,17 @@ REQUIRED_DATA_FIELDS = [
 
 REQUIRED_LINK_FIELDS = ["rssi", "snr"]
 
+
+def reject_nonstandard_json_constant(value):
+    raise ValueError(f"constante JSON nao permitida: {value}")
+
+
+def is_finite_number(value):
+    return (type(value) is int and value.bit_length() <= 1023) or (
+        type(value) is float and math.isfinite(value)
+    )
+
+
 def calculate_crc32(payload):
     return format(zlib.crc32(payload.encode("utf-8")) & 0xFFFFFFFF, "08X")
 
@@ -157,9 +181,13 @@ def validate_telemetry_packet(packet):
     if packet.get("type") != "telemetry":
         return False, ["type"]
     for field in ("cansat_id", "sequence", "mission_time_ms"):
-        if type(packet.get(field)) is not int or packet[field] < 0:
+        if (
+            type(packet.get(field)) is not int
+            or packet[field] < 0
+            or packet[field] > 2**63 - 1
+        ):
             return False, [field]
-    if not isinstance(packet.get("state"), str):
+    if not isinstance(packet.get("state"), str) or not packet["state"].strip():
         return False, ["state"]
 
     for field in REQUIRED_DATA_FIELDS:
@@ -167,16 +195,12 @@ def validate_telemetry_packet(packet):
         if field == "parachute":
             if type(value) is not bool:
                 return False, [f"data.{field}"]
-        elif type(value) not in (int, float) or (
-            type(value) is float and not math.isfinite(value)
-        ):
+        elif not is_finite_number(value):
             return False, [f"data.{field}"]
 
     for field in REQUIRED_LINK_FIELDS:
         value = link[field]
-        if type(value) not in (int, float) or (
-            type(value) is float and not math.isfinite(value)
-        ):
+        if not is_finite_number(value):
             return False, [f"link.{field}"]
 
     return True, []
@@ -201,8 +225,11 @@ def new_cansat_state():
         "status": "ONLINE",
         "last_sequence": None,
         "seen_sequences": set(),
+        "seen_sequence_order": deque(),
         "lost_sequences": set(),
+        "lost_sequence_order": deque(),
         "incomplete_sequences": set(),
+        "incomplete_sequence_order": deque(),
         "lost_packets": 0,
         "incomplete_packets": 0,
         "invalid_crc_packets": 0,
@@ -224,10 +251,12 @@ def classify_sequence(cansat, sequence):
         return "duplicate", []
 
     if sequence in cansat["lost_sequences"]:
-        cansat["lost_sequences"].remove(sequence)
+        forget_bounded_sequence(cansat, "lost_sequences", "lost_sequence_order", sequence)
         cansat["lost_packets"] -= 1
 
-    cansat["incomplete_sequences"].discard(sequence)
+    forget_bounded_sequence(
+        cansat, "incomplete_sequences", "incomplete_sequence_order", sequence
+    )
     last_sequence = cansat["last_sequence"]
     newly_lost = []
 
@@ -238,13 +267,20 @@ def classify_sequence(cansat, sequence):
                 and missing_sequence not in cansat["incomplete_sequences"]
                 and missing_sequence not in cansat["lost_sequences"]
             ):
-                cansat["lost_sequences"].add(missing_sequence)
+                remember_bounded_sequence(
+                    cansat,
+                    "lost_sequences",
+                    "lost_sequence_order",
+                    missing_sequence,
+                )
                 newly_lost.append(missing_sequence)
 
     if newly_lost:
         cansat["lost_packets"] += len(newly_lost)
 
-    cansat["seen_sequences"].add(sequence)
+    remember_bounded_sequence(
+        cansat, "seen_sequences", "seen_sequence_order", sequence
+    )
     if last_sequence is None or sequence > last_sequence:
         cansat["last_sequence"] = sequence
     cansat["received_packets"] += 1
@@ -255,9 +291,34 @@ def record_incomplete_packet(cansat, sequence):
     cansat["incomplete_packets"] += 1
     if sequence is not None:
         if sequence in cansat["lost_sequences"]:
-            cansat["lost_sequences"].remove(sequence)
+            forget_bounded_sequence(
+                cansat, "lost_sequences", "lost_sequence_order", sequence
+            )
             cansat["lost_packets"] -= 1
-        cansat["incomplete_sequences"].add(sequence)
+        remember_bounded_sequence(
+            cansat,
+            "incomplete_sequences",
+            "incomplete_sequence_order",
+            sequence,
+        )
+
+
+def remember_bounded_sequence(cansat, set_key, order_key, sequence):
+    values = cansat[set_key]
+    order = cansat[order_key]
+    if sequence in values:
+        return
+    if len(order) >= MAX_FLIGHT_HISTORY:
+        values.discard(order.popleft())
+    values.add(sequence)
+    order.append(sequence)
+
+
+def forget_bounded_sequence(cansat, set_key, order_key, sequence):
+    cansat[set_key].discard(sequence)
+    order = cansat[order_key]
+    if sequence in order:
+        order.remove(sequence)
 
 
 def get_packet_counts(cansat):
@@ -268,6 +329,21 @@ def get_packet_counts(cansat):
         "incomplete": cansat["incomplete_packets"],
         "crc_invalid": cansat["invalid_crc_packets"],
     }
+
+
+def receiving_state_event():
+    with capture_state_lock:
+        return {
+            "type": "receiver_state",
+            "enabled": capture_enabled,
+            "discarded_while_paused": discarded_while_paused,
+        }
+
+
+def append_bounded(history, payload, limit=MAX_FLIGHT_HISTORY):
+    history.append(payload)
+    if len(history) > limit:
+        del history[:-limit]
 
 
 class UDPTransport:
@@ -323,7 +399,7 @@ def handle_command(message):
 
 # --- RECEIVER DO TRANSPORTE ---
 def transport_receiver(transport_factory=UDPTransport):
-    global latest_packet, flight_history, transport
+    global latest_packet, flight_history, transport, discarded_while_paused
 
     transport = transport_factory("127.0.0.1", 5005)
 
@@ -332,120 +408,136 @@ def transport_receiver(transport_factory=UDPTransport):
     while True:
         try:
             data, address = transport.receive()
+        except OSError as error:
+            print(f"[Receiver] Falha no transporte: {error}")
+            return
+
+        try:
             payload = data.decode("utf-8")
-            packet = json.loads(payload)
-            if not isinstance(packet, dict):
-                print("Pacote ignorado: JSON nao e um objeto")
+            packet = json.loads(
+                payload,
+                parse_constant=reject_nonstandard_json_constant,
+            )
+        except UnicodeDecodeError as error:
+            print(f"Pacote ignorado: codificacao UTF-8 invalida ({error})")
+            continue
+        except (json.JSONDecodeError, ValueError, RecursionError) as error:
+            print(f"Pacote ignorado: JSON invalido ({error})")
+            continue
+
+        if not isinstance(packet, dict):
+            print("Pacote ignorado: JSON nao e um objeto")
+            continue
+
+        if packet.get("type") == "command_ack":
+            if verify_packet_crc(packet):
+                print(
+                    f"Resposta de comando recebida (CanSat "
+                    f"{packet.get('cansat_id', '?')}, "
+                    f"status={packet.get('status', '?')})"
+                )
+            else:
+                print("Resposta de comando descartada: CRC invalido")
+            continue
+
+        is_protocol_packet = packet.get("protocol") == "CANSAT-TLM"
+        if is_protocol_packet:
+            if packet.get("version") != 1 or packet.get("type") != "telemetry":
+                print("Pacote CANSAT-TLM ignorado: versao ou tipo nao suportado.")
                 continue
 
-            if packet.get("type") == "command_ack":
-                if verify_packet_crc(packet):
-                    print(
-                        f"Resposta de comando recebida (CanSat "
-                        f"{packet.get('cansat_id', '?')}, "
-                        f"status={packet.get('status', '?')})"
-                    )
-                else:
-                    print("Resposta de comando descartada: CRC invalido")
-                continue
-
-            is_protocol_packet = packet.get("protocol") == "CANSAT-TLM"
-            if is_protocol_packet:
-                if packet.get("version") != 1 or packet.get("type") != "telemetry":
-                    continue
-
-                if not verify_packet_crc(packet):
-                    cansat_id = packet.get("cansat_id")
-                    if type(cansat_id) is int and cansat_id >= 0:
+            if not verify_packet_crc(packet):
+                cansat_id = packet.get("cansat_id")
+                if type(cansat_id) is int and cansat_id >= 0:
+                    with cansats_lock:
                         cansat = get_cansat_state(cansat_id)
                         cansat["invalid_crc_packets"] += 1
-                        emit_event({
-                            "type": "packet_status",
-                            "packet_status": "crc_invalid",
-                            "cansat_id": cansat_id,
-                            "sequence": packet.get("sequence"),
-                            "packet_counts": get_packet_counts(cansat),
-                        })
-                    print(
-                        f"CRC invalido (CanSat {cansat_id}, "
-                        f"seq {packet.get('sequence', '?')})"
-                    )
-                    continue
+                        packet_counts = get_packet_counts(cansat)
+                    emit_event({
+                        "type": "packet_status",
+                        "packet_status": "crc_invalid",
+                        "cansat_id": cansat_id,
+                        "sequence": packet.get("sequence"),
+                        "packet_counts": packet_counts,
+                    })
+                print(
+                    f"CRC invalido (CanSat {cansat_id}, "
+                    f"seq {packet.get('sequence', '?')})"
+                )
+                continue
 
-                valid, missing_fields = validate_telemetry_packet(packet)
-                if not valid:
-                    cansat_id = packet.get("cansat_id")
-                    sequence = packet.get("sequence")
-                    if type(cansat_id) is int and cansat_id >= 0:
+            valid, missing_fields = validate_telemetry_packet(packet)
+            if not valid:
+                cansat_id = packet.get("cansat_id")
+                sequence = packet.get("sequence")
+                if type(cansat_id) is int and cansat_id >= 0:
+                    with cansats_lock:
                         cansat = get_cansat_state(cansat_id)
                         sequence = sequence if type(sequence) is int and sequence >= 0 else None
                         record_incomplete_packet(cansat, sequence)
-                        emit_event({
-                            "type": "packet_status",
-                            "packet_status": "incomplete",
-                            "cansat_id": cansat_id,
-                            "sequence": sequence,
-                            "packet_counts": get_packet_counts(cansat),
-                        })
-                    print(
-                        f"Pacote incompleto (CanSat {cansat_id}, "
-                        f"seq {sequence}): {', '.join(missing_fields)}"
-                    )
-                    continue
+                        packet_counts = get_packet_counts(cansat)
+                    emit_event({
+                        "type": "packet_status",
+                        "packet_status": "incomplete",
+                        "cansat_id": cansat_id,
+                        "sequence": sequence,
+                        "packet_counts": packet_counts,
+                    })
+                print(
+                    f"Pacote incompleto (CanSat {cansat_id}, "
+                    f"seq {sequence}): {', '.join(missing_fields)}"
+                )
+                continue
 
-                cansat_id = packet.get("cansat_id", 0)
-                sequence = packet.get("sequence", 0)
-                mission_time_ms = packet.get("mission_time_ms", 0)
-                state = packet.get("state", "N/D")
+            cansat_id = packet["cansat_id"]
+            sequence = packet["sequence"]
+            mission_time_ms = packet["mission_time_ms"]
+            state = packet["state"]
 
-                data_block = packet.get("data", {})
-                link_block = packet.get("link", {})
+            data_block = packet["data"]
+            link_block = packet["link"]
+            parsed = {
+                "id": sequence,
+                "cansat_id": cansat_id,
+                "sequence": sequence,
+                "mission_time_ms": mission_time_ms,
+                "tempo": mission_time_ms / 1000.0,
+                "estado": state,
+                "altitude": data_block.get("altitude"),
+                "velocidade": data_block.get("velocity"),
+                "aceleracao": data_block.get("acceleration"),
+                "forca_g": data_block.get("force_g"),
+                "temperatura": data_block.get("temperature"),
+                "humidade": data_block.get("humidity"),
+                "pressao": data_block.get("pressure"),
+                "eco2": data_block.get("eco2"),
+                "tvoc": data_block.get("tvoc"),
+                "uv": data_block.get("uv"),
+                "lux": data_block.get("lux"),
+                "acc_x": data_block.get("acc_x"),
+                "acc_y": data_block.get("acc_y"),
+                "acc_z": data_block.get("acc_z"),
+                "gyro_x": data_block.get("gyro_x"),
+                "gyro_y": data_block.get("gyro_y"),
+                "gyro_z": data_block.get("gyro_z"),
+                "pitch": data_block.get("pitch"),
+                "roll": data_block.get("roll"),
+                "yaw": data_block.get("yaw"),
+                "paraquedas": data_block.get("parachute", False),
+                "rssi": link_block.get("rssi"),
+                "snr": link_block.get("snr"),
+            }
+        else:
+            parsed = packet
 
-                # -------------------------------------------------
-                # Converter para o formato que a Ground Station
-                # original já utiliza internamente
-                # -------------------------------------------------
-                parsed = {
-                    "id": sequence,
-                    "cansat_id": cansat_id,
-                    "sequence": sequence,
-                    "mission_time_ms": mission_time_ms,
-                    "tempo": mission_time_ms / 1000.0,
-                    "estado": state,
-                    "altitude": data_block.get("altitude"),
-                    "velocidade": data_block.get("velocity"),
-                    "aceleracao": data_block.get("acceleration"),
-                    "forca_g": data_block.get("force_g"),
-                    "temperatura": data_block.get("temperature"),
-                    "humidade": data_block.get("humidity"),
-                    "pressao": data_block.get("pressure"),
-                    "eco2": data_block.get("eco2"),
-                    "tvoc": data_block.get("tvoc"),
-                    "uv": data_block.get("uv"),
-                    "lux": data_block.get("lux"),
-                    "acc_x": data_block.get("acc_x"),
-                    "acc_y": data_block.get("acc_y"),
-                    "acc_z": data_block.get("acc_z"),
-                    "gyro_x": data_block.get("gyro_x"),
-                    "gyro_y": data_block.get("gyro_y"),
-                    "gyro_z": data_block.get("gyro_z"),
-                    "pitch": data_block.get("pitch"),
-                    "roll": data_block.get("roll"),
-                    "yaw": data_block.get("yaw"),
-                    "paraquedas": data_block.get("parachute", False),
-                    "rssi": link_block.get("rssi"),
-                    "snr": link_block.get("snr"),
-                }
+        cansat_id = parsed.get("cansat_id")
+        if cansat_id is not None and (type(cansat_id) is not int or cansat_id < 0):
+            print(f"Pacote ignorado: cansat_id invalido ({cansat_id!r})")
+            continue
 
-                normalized_payload = json.dumps(parsed)
-            else:
-                parsed = packet
-                normalized_payload = payload
-
-            cansat_id = parsed.get("cansat_id")
-
-            if cansat_id is not None:
-                peer_addresses[cansat_id] = address
+        if cansat_id is not None:
+            peer_addresses[cansat_id] = address
+            with cansats_lock:
                 cansat = get_cansat_state(cansat_id)
                 was_offline = cansat["status"] == "OFFLINE"
                 cansat["last_received"] = time.time()
@@ -465,72 +557,88 @@ def transport_receiver(transport_factory=UDPTransport):
                         "lost_packets": cansat["lost_packets"],
                         "packet_counts": get_packet_counts(cansat),
                     }
-                    emit_event(online_event)
+                else:
+                    online_event = None
 
-                current_sequence = parsed.get("sequence")
-                if type(current_sequence) is int and current_sequence >= 0:
-                    if is_protocol_packet:
+            if online_event is not None:
+                emit_event(online_event)
+
+            current_sequence = parsed.get("sequence")
+            if type(current_sequence) is int and current_sequence >= 0:
+                if is_protocol_packet:
+                    try:
                         send_ack(cansat_id, current_sequence, address)
+                    except OSError as error:
+                        print(f"Falha ao enviar ACK (CanSat {cansat_id}): {error}")
+
+                with cansats_lock:
+                    cansat = get_cansat_state(cansat_id)
                     packet_status, newly_lost = classify_sequence(cansat, current_sequence)
+                    packet_counts = get_packet_counts(cansat)
+                    lost_packets = cansat["lost_packets"]
 
-                    if packet_status == "duplicate":
-                        if is_protocol_packet:
-                            emit_event({
-                                "type": "packet_status",
-                                "packet_status": "duplicate",
-                                "cansat_id": cansat_id,
-                                "sequence": current_sequence,
-                                "packet_counts": get_packet_counts(cansat),
-                            })
-                        continue
-
-                    for lost_sequence in newly_lost:
+                if packet_status == "duplicate":
+                    if is_protocol_packet:
                         emit_event({
                             "type": "packet_status",
-                            "packet_status": "lost",
+                            "packet_status": "duplicate",
                             "cansat_id": cansat_id,
-                            "sequence": lost_sequence,
-                            "lost_packets": cansat["lost_packets"],
-                            "packet_counts": get_packet_counts(cansat),
+                            "sequence": current_sequence,
+                            "packet_counts": packet_counts,
                         })
+                    continue
 
-                    parsed["packet_status"] = "received"
+                for lost_sequence in newly_lost:
+                    emit_event({
+                        "type": "packet_status",
+                        "packet_status": "lost",
+                        "cansat_id": cansat_id,
+                        "sequence": lost_sequence,
+                        "lost_packets": lost_packets,
+                        "packet_counts": packet_counts,
+                    })
 
-                cansat["latest"] = normalized_payload
-                cansat["history"].append(normalized_payload)
+                parsed["packet_status"] = "received"
 
-                if is_protocol_packet:
-                    normalized_payload = json.dumps(parsed)
-                    cansat["latest"] = normalized_payload
-                    cansat["history"][-1] = normalized_payload
+        normalized_payload = json.dumps(parsed, separators=(",", ":"), allow_nan=False)
 
-            latest_packet = normalized_payload
-            flight_history.append(normalized_payload)
+        try:
+            with capture_state_lock:
+                if not capture_enabled:
+                    discarded_while_paused += 1
+                    continue
 
-            if CONNECTED_CLIENTS:
-                cansat = cansats.get(cansat_id, {})
-                websocket_payload = {
-                    "type": "telemetry",
-                    "data": parsed,
-                    "cansat_status": cansat.get("status", "ONLINE"),
-                    "lost_packets": cansat.get("lost_packets", 0),
-                    "packet_status": parsed.get("packet_status", "received"),
-                    "packet_counts": get_packet_counts(cansat)
-                    if cansat
-                    else {},
-                }
-                emit_event(websocket_payload)
+                row = [parsed.get(header, "") for header in csv_headers]
+                with open(csv_filename, mode="a", newline="", encoding="utf-8") as file:
+                    csv.writer(file).writerow(row)
 
-            row = [parsed.get(h, "") for h in csv_headers]
+                if cansat_id is not None:
+                    with cansats_lock:
+                        cansat = get_cansat_state(cansat_id)
+                        cansat["latest"] = normalized_payload
+                        append_bounded(cansat["history"], normalized_payload)
 
-            with open(csv_filename, mode="a", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(row)
+                latest_packet = normalized_payload
+                append_bounded(flight_history, normalized_payload)
+        except OSError as error:
+            print(f"[Logger] Falha ao guardar pacote no CSV: {error}")
+            continue
 
-        except Exception as e:
-            print(f"⚠️ [UDP Receiver] Erro: {e}")
+        if CONNECTED_CLIENTS:
+            with cansats_lock:
+                cansat = cansats.get(cansat_id, {}) if cansat_id is not None else {}
+                cansat_status = cansat.get("status", "ONLINE")
+                lost_packets = cansat.get("lost_packets", 0)
+                packet_counts = get_packet_counts(cansat) if cansat else {}
 
-
+            emit_event({
+                "type": "telemetry",
+                "data": parsed,
+                "cansat_status": cansat_status,
+                "lost_packets": lost_packets,
+                "packet_status": parsed.get("packet_status", "received"),
+                "packet_counts": packet_counts,
+            })
 def check_cansat_status():
     while True:
         try:
@@ -563,32 +671,61 @@ def check_cansat_status():
 
 async def broadcast(message):
     if CONNECTED_CLIENTS:
-        await asyncio.gather(
-            *(client.send(message) for client in CONNECTED_CLIENTS),
+        results = await asyncio.gather(
+            *(client.send(message) for client in tuple(CONNECTED_CLIENTS)),
             return_exceptions=True,
         )
+        for result in results:
+            if isinstance(result, Exception):
+                print(f"[WebSocket] Falha ao enviar evento: {result}")
 
 
 # --- WEBSOCKET SERVER ---
 async def ws_handler(websocket):
-    global flight_history, latest_packet
+    global capture_enabled, discarded_while_paused, flight_history, latest_packet
     CONNECTED_CLIENTS.add(websocket)
     try:
-        for past_packet in flight_history:
+        with capture_state_lock:
+            past_packets = flight_history[:]
+            state_event = receiving_state_event()
+        await websocket.send(json.dumps(state_event))
+        for past_packet in past_packets:
             await websocket.send(past_packet)
 
         async for message in websocket:
             try:
-                data = json.loads(message)
-                if data.get("action") == "clear":
+                data = json.loads(
+                    message,
+                    parse_constant=reject_nonstandard_json_constant,
+                )
+            except (json.JSONDecodeError, ValueError, RecursionError) as error:
+                print(f"[WebSocket] Mensagem JSON invalida: {error}")
+                continue
+
+            if not isinstance(data, dict):
+                print("[WebSocket] Mensagem ignorada: esperado um objeto JSON.")
+                continue
+
+            if data.get("action") == "clear":
+                with capture_state_lock:
                     flight_history = []
                     latest_packet = None
                     print("🗑️ [Server] Histórico de voo limpo a pedido do cliente.")
-                elif data.get("type") == "command":
-                    result = handle_command(data)
-                    await websocket.send(json.dumps(result))
-            except Exception:
-                pass
+            elif data.get("action") == "set_capture":
+                enabled = data.get("enabled")
+                if type(enabled) is not bool:
+                    await websocket.send(json.dumps({
+                        "type": "command_status",
+                        "status": "error",
+                        "reason": "invalid_capture_state",
+                    }))
+                    continue
+                with capture_state_lock:
+                    capture_enabled = enabled
+                await broadcast(json.dumps(receiving_state_event()))
+            elif data.get("type") == "command":
+                result = handle_command(data)
+                await websocket.send(json.dumps(result))
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
@@ -735,6 +872,7 @@ HTML_CODE = r"""<!DOCTYPE html>
             <button class="btn btn-hab" id="btnHab" onclick="toggleHabPanel()">🌍 vs Terra</button>
             <button class="btn btn-export" onclick="downloadCSV()">📥 Exportar CSV</button>
             <button class="btn btn-img" onclick="downloadChartsAsImages()">📸 Baixar Gráficos (PNG)</button>
+            <button class="btn btn-cancel" id="btnCapture" onclick="toggleCapture()">⏸️ Pausar captura</button>
             <button class="btn btn-clear" onclick="openClearModal()">🗑️ Limpar Dados</button>
             <div id="status" class="status">AGUARDANDO DADOS...</div>
             <span id="modeBadge" class="mode-badge live">MODO LIVE</span>
@@ -943,6 +1081,8 @@ HTML_CODE = r"""<!DOCTYPE html>
         });
 
         let rawDataLog = [];
+        let captureEnabled = true;
+        const maxClientHistory = 2000;
         let currentState = null;
         let lastPhaseTime = -999; 
         let lastPhaseLabelTime = ""; 
@@ -954,8 +1094,8 @@ HTML_CODE = r"""<!DOCTYPE html>
         let replayPlaying = false;
         let replayTimer = null;
         let replaySpeed = 1;
-        let lastAlt = null;
-        let lastTempo = null;
+        const lastAltByCansat = {};
+        const lastTempoByCansat = {};
         let windSamples = []; // {dx, dy, dt} approx during descent
 
         const chartConfigs = [
@@ -1301,21 +1441,29 @@ HTML_CODE = r"""<!DOCTYPE html>
 
         // ========== FASE 1: Paraquedas & Queda-livre ==========
         function updateParachute(data) {
+            const cansatKey = String(data.cansat_id ?? 1);
             const v = data.velocidade !== undefined && data.velocidade !== null
-                ? parseFloat(data.velocidade)
+                ? Number(data.velocidade)
                 : null;
-            const alt = data.altitude !== undefined ? parseFloat(data.altitude) : null;
-            const tempo = data.tempo !== undefined ? parseFloat(data.tempo) : null;
+            const alt = data.altitude !== undefined && data.altitude !== null
+                ? Number(data.altitude)
+                : null;
+            const tempo = data.tempo !== undefined && data.tempo !== null
+                ? Number(data.tempo)
+                : null;
+            const previousAlt = lastAltByCansat[cansatKey] ?? null;
+            const previousTempo = lastTempoByCansat[cansatKey] ?? null;
             const paraFlag = data.paraquedas;
 
             // Vertical speed: prefer provided velocidade; else derive from altitude delta
-            let vVert = v;
-            if ((vVert === null || isNaN(vVert)) && lastAlt !== null && lastTempo !== null && alt !== null && tempo !== null) {
-                const dt = tempo - lastTempo;
-                if (dt > 0) vVert = (alt - lastAlt) / dt;
+            let vVert = Number.isFinite(v) ? v : null;
+            if (vVert === null && previousAlt !== null && previousTempo !== null &&
+                Number.isFinite(alt) && Number.isFinite(tempo)) {
+                const dt = tempo - previousTempo;
+                if (dt > 0) vVert = (alt - previousAlt) / dt;
             }
-            if (alt !== null) lastAlt = alt;
-            if (tempo !== null) lastTempo = tempo;
+            if (Number.isFinite(alt)) lastAltByCansat[cansatKey] = alt;
+            if (Number.isFinite(tempo)) lastTempoByCansat[cansatKey] = tempo;
 
             const dot = document.getElementById('paraDot');
             const label = document.getElementById('paraLabel');
@@ -1334,7 +1482,10 @@ HTML_CODE = r"""<!DOCTYPE html>
             // Convention: positive velocidade often means downward in many CanSat firmwares; we treat magnitude
             const speedDown = Math.abs(vVert);
             // Heuristic: if altitude increasing → ascent
-            const ascending = (lastAlt !== null && alt !== null && alt > lastAlt + 0.3) || (vVert > 0.5 && (data.estado || '').toLowerCase().includes('subi'));
+            const ascendingByAltitude = previousAlt !== null && Number.isFinite(alt) &&
+                alt > previousAlt + 0.3;
+            const ascending = ascendingByAltitude ||
+                (vVert > 0.5 && (data.estado || '').toLowerCase().includes('subi'));
 
             if (ascending || (data.estado || '').toLowerCase().match(/descol|ascent|subida|launch/)) {
                 dot.classList.add('yellow');
@@ -1625,11 +1776,22 @@ HTML_CODE = r"""<!DOCTYPE html>
         }
 
         function updateGauges(data) {
-            const alt = data.altitude !== undefined ? parseFloat(data.altitude) : null;
-            let vs = data.velocidade !== undefined ? parseFloat(data.velocidade) : null;
-            if (lastAlt !== null && alt !== null && data.tempo !== undefined && lastTempo !== null) {
-                const dt = parseFloat(data.tempo) - lastTempo;
-                if (dt > 0.05) vs = (alt - lastAlt) / dt;
+            const cansatKey = String(data.cansat_id ?? 1);
+            const alt = data.altitude !== undefined && data.altitude !== null
+                ? Number(data.altitude)
+                : null;
+            const tempo = data.tempo !== undefined && data.tempo !== null
+                ? Number(data.tempo)
+                : null;
+            let vs = data.velocidade !== undefined && data.velocidade !== null
+                ? Number(data.velocidade)
+                : null;
+            const previousAlt = lastAltByCansat[cansatKey] ?? null;
+            const previousTempo = lastTempoByCansat[cansatKey] ?? null;
+            if (previousAlt !== null && Number.isFinite(alt) &&
+                previousTempo !== null && Number.isFinite(tempo)) {
+                const dt = tempo - previousTempo;
+                if (dt > 0.05) vs = (alt - previousAlt) / dt;
             }
             const pitch = data.pitch !== undefined ? parseFloat(data.pitch) : 0;
             const roll = data.roll !== undefined ? parseFloat(data.roll) : 0;
@@ -2039,7 +2201,13 @@ function selectCansat(id) {
 
         function processPacket(data, fromReplay = false) {
             if (!fromReplay && currentMode === 'replay') return; // ignore live while in replay
-            if (!fromReplay) rawDataLog.push(data);
+            if (!fromReplay && !captureEnabled) return;
+            if (!fromReplay) {
+                rawDataLog.push(data);
+                if (rawDataLog.length > maxClientHistory) {
+                    rawDataLog.splice(0, rawDataLog.length - maxClientHistory);
+                }
+            }
             
             updateCansatOverview(data);
             
@@ -2049,6 +2217,12 @@ function selectCansat(id) {
                 }
 
                 cansatData[data.cansat_id].push(data);
+                if (cansatData[data.cansat_id].length > maxClientHistory) {
+                    cansatData[data.cansat_id].splice(
+                        0,
+                        cansatData[data.cansat_id].length - maxClientHistory
+                    );
+                }
             }
 
             document.getElementById('status').innerText = "ESTADO: " + (data.estado || "N/D");
@@ -2092,9 +2266,9 @@ function selectCansat(id) {
             }
 
             // FASE 1–3
+            updateGauges(data);
             updateParachute(data);
             updateWind(data);
-            updateGauges(data);
             updateHabitability(data);
 
             const fields = {
@@ -2148,7 +2322,14 @@ function selectCansat(id) {
             try {
                 const message = JSON.parse(event.data);
 
-                if (message.type === "telemetry") {
+                if (message.type === "receiver_state") {
+                    updateCaptureButton(message.enabled, message.discarded_while_paused);
+                    if (currentMode === 'live') {
+                        document.getElementById('status').innerText = message.enabled
+                            ? "Captura ativa."
+                            : `Captura pausada — ${message.discarded_while_paused} pacotes descartados (ACKs ativos).`;
+                    }
+                } else if (message.type === "telemetry") {
                     const data = message.data;
 
                     data.cansat_status = message.cansat_status;
@@ -2257,6 +2438,28 @@ function selectCansat(id) {
             }
         }
 
+        function toggleCapture() {
+            if (ws.readyState !== WebSocket.OPEN) {
+                document.getElementById('status').innerText = "Sem ligação à Ground Station.";
+                return;
+            }
+            ws.send(JSON.stringify({
+                action: "set_capture",
+                enabled: !captureEnabled
+            }));
+        }
+
+        function updateCaptureButton(enabled, discarded) {
+            captureEnabled = enabled;
+            const button = document.getElementById('btnCapture');
+            button.textContent = enabled ? '⏸️ Pausar captura' : '▶️ Retomar captura';
+            button.classList.toggle('btn-cancel', enabled);
+            button.classList.toggle('btn-export', !enabled);
+            button.title = enabled
+                ? 'Pausar gráficos e gravação CSV (os ACKs continuam ativos)'
+                : `${discarded} pacotes recebidos durante a pausa não foram guardados`;
+        }
+
         function parseCSV(text) {
             const lines = text.trim().split(/\r?\n/);
             if (lines.length < 2) return [];
@@ -2335,8 +2538,8 @@ function selectCansat(id) {
             currentState = null;
             lastPhaseTime = -999;
             lastPhaseLabelTime = "";
-            lastAlt = null;
-            lastTempo = null;
+            Object.keys(lastAltByCansat).forEach(id => delete lastAltByCansat[id]);
+            Object.keys(lastTempoByCansat).forEach(id => delete lastTempoByCansat[id]);
             windSamples = [];
             chartConfigs.forEach(cfg => {
                 const chart = charts[cfg.id];
@@ -2716,8 +2919,8 @@ function selectCansat(id) {
             currentState = null;
             lastPhaseTime = -999;
             lastPhaseLabelTime = "";
-            lastAlt = null;
-            lastTempo = null;
+            Object.keys(lastAltByCansat).forEach(id => delete lastAltByCansat[id]);
+            Object.keys(lastTempoByCansat).forEach(id => delete lastTempoByCansat[id]);
             windSamples = [];
             stopReplay();
             replayData = [];
