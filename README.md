@@ -1,166 +1,128 @@
-# 🚀 CanSat Ground Station & Simulator
+# CanSat Ground Station & Simulator
 
-Este repositório contém a **Estação de Solo (Ground Station)** e o **Simulador de Voo** desenvolvidos em Python e C++ para monitorização de telemetria em tempo real de um projeto CanSat/Minifoguete.
+Este repositório contém uma Ground Station para telemetria de **um ou vários CanSats** e um simulador C++ multicansat. A Ground Station principal é `groundstation.py`.
 
----
+## Funcionalidades
 
-## 📋 Funcionalidades
+- Painel Web em tempo real com gráficos, estado de voo, indicadores e vista geral ou individual por CanSat.
+- Protocolo CANSAT-TLM v1, com validação dos campos e CRC32, ACKs, identificação de pacotes duplicados/perdidos e estado de ligação.
+- Compatibilidade com um CanSat ou vários. O simulador incluído gera cinco CanSats; a GS não exige que todos estejam ativos.
+- Gravação automática em CSV, incluindo `cansat_id`, em `dados_voo/`.
+- Botão **Pausar captura**: deixa de atualizar gráficos e CSV, mas continua a receber, validar e confirmar os pacotes com ACK. Os pacotes recebidos durante a pausa são descartados.
+- Históricos de voo e gráficos limitados a 2000 amostras em memória.
+- Exportação de CSV/ZIP e de gráficos PNG; modo replay a partir de CSV.
+- Transporte UDP e variante serial para APC220.
 
-* **Painel Web em Tempo Real:** Interface desenvolvida em HTML5/JavaScript com gráficos dinâmicos (*Chart.js*) organizados em grelha responsiva (2 por linha).
-* **Gestão Inteligente de Fases de Voo:** Deteção de transições de estado (*Espera*, *Subida*, *Apogeu*, *Descida*) com etiquetagem automática e sobreposição inteligente de rótulos na mesma linha vertical.
-* **Métricas de Voo e KPIs:** Exibição automática dos valores Mínimo, Máximo e Média no topo de cada gráfico, com painel completo de telemetria em tempo real.
-* **Gravação Automática em CSV:** Salvamento instantâneo (*append mode*) de todos os pacotes recebidos na pasta `dados_voo/`, garantindo a persistência contra falhas do sistema.
-* **Suporte multicansat:** A GS identifica os cinco CanSats, valida pacotes CANSAT-TLM v1 com CRC32, confirma pacotes válidos com ACK e regista `cansat_id` no CSV.
-* **Pausa da captura:** O botão **Pausar captura** suspende os gráficos e o CSV, mas mantém a receção, a validação e os ACKs ativos; os pacotes recebidos durante a pausa são descartados.
-* **Memória limitada:** Históricos visuais e de voo limitados a 2000 amostras.
-* **Exportação de Dados:** Descarga direta do histórico em `.csv` ou captura em imagem `.png` de todos os gráficos combinados através do painel.
+## Estrutura
 
----
-
-## 📁 Estrutura do Projeto
-
+```text
 cansat-cpp/
-├── groundstation.py         # Ground Station multicansat UDP
-├── groundstation_serial.py  # Ground Station via serial/APC220
-├── iniciar_cansat.bat       # Arranque Windows (GS + confirmação para iniciar simulador)
-├── FORMATO_TELEMETRIA.txt   # Formato e exemplo válido de pacote CANSAT-TLM
-├── guardar.sh              # Script auxiliar para automação
-├── entrar.sh               # Script de inicialização da ponte Termux/Ubuntu
-├── dados_voo/              # Pasta onde são gravados os ficheiros de telemetria .csv
+├── groundstation.py
+├── groundstation_serial.py
+├── FORMATO_TELEMETRIA.txt
+├── iniciar_cansat.bat
+├── README.md
+├── README-Linux.txt
+├── README-Windows.txt
 └── simulador/
-    ├── simulador.cpp       # Código-fonte do simulador de voo em C++
-    ├── compilar.sh         # Script Linux para compilação do simulador
-    ├── compilar.bat        # Script Windows para compilação do simulador
-    └── iniciar_simulador.bat # Arranque Windows com as DLLs do MSYS2
-
----
-
-## 🛠️ Requisitos e Dependências
-
-No ambiente Linux/Ubuntu (via Termux/PROOT), garante que tens instaladas as seguintes dependências:
-
-* **Python 3** (com `websockets` e `pyserial`):
-
-```bash
-pip install websockets pyserial
+    ├── simulador.cpp
+    ├── compilar.sh
+    ├── compilar.bat
+    └── iniciar_simulador.bat
 ```
 
-* **Compilador C++ (g++)**:
+## Requisitos
+
+### Linux / Ubuntu / Termux
+
+Instala Python 3 e as dependências:
 
 ```bash
-apt update && apt install g++ nlohmann-json3-dev -y
+python3 -m pip install websockets pyserial
 ```
----
 
-## 🚀 Como Executar o Sistema
+Para compilar o simulador, instala `g++` e os cabeçalhos nlohmann-json:
 
-Para que a telemetria funcione corretamente, **a Estação de Solo deve ser sempre iniciada antes do Simulador**.
+```bash
+# Ubuntu/Debian
+sudo apt update
+sudo apt install g++ nlohmann-json3-dev
 
-### 1. Iniciar a Estação de Solo (Ground Station)
-Abre o terminal e executa o servidor da estação de solo:
+# Termux
+pkg install g++ nlohmann-json
+```
+
+### Windows
+
+- Python 3, com o launcher `py`.
+- MSYS2 UCRT64 com `g++` e `nlohmann-json`:
+
+```bash
+pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nlohmann-json
+```
+
+Instala a dependência da GS:
+
+```powershell
+py -3 -m pip install websockets
+```
+
+Para APC220 no Windows, instala também `pyserial` com `py -3 -m pip install pyserial`.
+
+## Executar em Linux
+
+Inicia primeiro a Ground Station:
+
 ```bash
 python3 groundstation.py
 ```
-* **O que acontece:** O servidor UDP (porta 5005), o servidor WebSocket (porta 8051) e o servidor Web HTTP (porta 8050) são iniciados.
-* **Aceder à Interface:** Abre o navegador Web do teu dispositivo e acede ao endereço:
-  http://127.0.0.1:8050
 
----
+Abre <http://127.0.0.1:8050>. A GS escuta UDP em `127.0.0.1:5005`, WebSocket em `127.0.0.1:8051` e disponibiliza o painel HTTP em `127.0.0.1:8050`.
+O transporte UDP está limitado ao loopback (`127.0.0.1`); para a ligação por rádio/APC220, usa a variante serial descrita abaixo.
 
-### 2. Compilar e Iniciar o Simulador de Voo
-Abre um **segundo terminal** (mantendo a Ground Station a correr no primeiro) e entra na pasta do simulador:
+Para executar o simulador multicansat, num segundo terminal:
+
 ```bash
 cd simulador
 ./compilar.sh
 ./simulador
 ```
-* **O que acontece:** O simulador começa a gerar dados físicos de voo (altitude, velocidade, aceleração, pressão, sensores ambientais) e a enviá-los via UDP para a estação de solo.
-* **Visualização:** Acompanha os gráficos a serem desenhados em tempo real na página web.
 
-No Windows, instala `websockets` com `py -3 -m pip install websockets` e
-instala MSYS2 UCRT64 com g++ e nlohmann-json. A partir da pasta do projeto,
-executa `iniciar_cansat.bat`: compila o simulador, inicia `groundstation.py`,
-abre `http://127.0.0.1:8050` e pergunta quando iniciar os cinco CanSats.
-Para executar o simulador manualmente, usa `simulador/iniciar_simulador.bat`
-para também configurar as DLLs do MSYS2 no PATH.
+O simulador gera cinco CanSats. Um único CanSat compatível com CANSAT-TLM v1 também pode enviar para a mesma GS.
 
-### Ground Station com APC220
+## Executar em Windows
 
-Liga o APC220 do PC a uma porta USB-serial e inicia a variante serial:
+O método automatizado recomendado é executar `iniciar_cansat.bat` na pasta do projeto. O script compila o simulador, inicia `groundstation.py`, abre o painel e pergunta se queres iniciar os cinco CanSats simulados.
+
+Para iniciar os componentes manualmente, executa `py -3 groundstation.py`; depois, num segundo terminal:
+
+```bat
+cd simulador
+compilar.bat
+iniciar_simulador.bat
+```
+
+`iniciar_simulador.bat` prepara o PATH das DLLs do MSYS2. A instalação padrão esperada é `C:\msys64`; se usares outra pasta, adiciona `ucrt64\bin` ao PATH do Windows.
+
+## APC220 (serial)
+
+Liga o APC220 do PC a uma porta USB-serial e inicia a variante que reutiliza a mesma Ground Station e o mesmo painel:
 
 ```bash
 python3 groundstation_serial.py --port /dev/ttyUSB0 --baudrate 9600
 ```
 
-Substitui a porta e o baudrate pelos valores do adaptador e dos dois módulos
-APC220. A telemetria, os ACKs e os comandos têm de ser enviados como um objeto
-JSON por linha, terminado em newline (`\n`). A interface Web continua em
-`http://127.0.0.1:8050` e usa o mesmo protocolo CANSAT-TLM.
+Substitui a porta e o baudrate pelos valores do teu adaptador e dos módulos. No Windows, indica a porta COM, por exemplo `--port COM3`. O protocolo serial usa uma mensagem JSON por linha, terminada em newline (`\n`); a ligação entre os módulos tem de transportar telemetria e respostas ACK. Não inicies simultaneamente a variante UDP e a serial, pois ambas usam as mesmas portas Web e WebSocket.
 
----
+## Captura, dados e encerramento
 
-## 📖 Guia Prático de Utilização
+- **Pausar captura** interrompe os gráficos e a gravação CSV. A GS continua a receber e a enviar ACKs, mas não guarda os pacotes recebidos enquanto está pausada. **Retomar captura** reativa a gravação.
+- Os ficheiros da sessão são criados em `dados_voo/` com nomes como `voo_cansat_AAAA-MM-DD_HH-MM-SS.csv`. Cada linha inclui `cansat_id`; os ficheiros antigos sem essa coluna continuam a poder ser carregados no replay.
+- Prime `Ctrl+C` no terminal do simulador para o parar e, depois, no terminal da GS.
+- O formato do pacote e um exemplo com CRC32 estão em [FORMATO_TELEMETRIA.txt](FORMATO_TELEMETRIA.txt).
 
-### Passo a Passo do Teste de Voo:
+## Resolução de problemas
 
-1. **Abrir dois terminais** (ou duas abas do Termux/Ubuntu).
-2. **No Terminal 1:** Arranca a Ground Station
-```bash
-python3 groundstation.py
-```
-4. **No Navegador:** Abre a página `http://127.0.0.1:8050`. Vais ver os painéis a zeros, à espera de pacotes.
-5. **No Terminal 2:** Vai à pasta `simulador` e compila e executa `./simulador`.
-```bash
-cd simulador/
-./compilar.sh
-./simulador
-```
-7. **Acompanhar o Voo:**
-   * Os gráficos começam a desenhar as curvas em tempo real.
-   * As etiquetas das fases do voo (**Subida**, **Apogeu**, **Descida**) aparecem automaticamente nos gráficos à medida que ocorrem as transições.
-   * Os KPIs (Máx, Mín, Média) atualizam-se no topo de cada gráfico.
-8. **Encerrar a Simulação:**
-   * Assim que o CanSat aterrar (ou quando quiseres parar), vai ao **Terminal 2** e clica em `Ctrl + C`.
-   * Vai ao **Terminal 1** e clica em `Ctrl + C` para fechar o servidor.
-9. **Ver os Dados:** Acede à pasta `dados_voo/` para encontrares o ficheiro `.csv` completo criado durante essa sessão.
-
----
-
-## 🛑 Como Parar a Execução
-
-### Parar o Simulador
-No terminal do simulador, prime `Ctrl + C` para interromper o envio UDP.
-
-### Parar a Estação de Solo
-No terminal da Ground Station, prime `Ctrl + C` para fechar os servidores. Os dados gravados no `.csv` continuam salvos em segurança na pasta `dados_voo/`.
-
----
-
-## 🔧 Resolução de Problemas Rápidos
-
-* **Porta em uso (Address already in use):**
-  Se o servidor não arrancar por causa de uma porta ocupada, fecha outros processos em segundo plano com:
-```bash
-fuser -k 8050/tcp 8051/tcp 5005/udp
-```
-* **Instalar as dependencias `pip` por vezes exige ambiente pip para instalar. use os seguintes passos sempre que quiser utilizar:**
-
-```bash
-pkg install python python-pip
-```
-ou
-```bash
-sudo apt install python3-venv
-```
-e por fim
-```bash
-python3 -m venv pip
-source pip/bin/activate
-```
----
-
-## 💾 Gestão dos Dados de Voo (.csv)
-
-* Todos os ficheiros gerados são nomeados no formato com carimbo de data/hora:
-  `voo_cansat_AAAA-MM-DD_HH-MM-SS.csv`
-* Se usas o script `./entrar.sh` a partir do Termux, esta pasta encontra-se sincronizada diretamente com a memória do Termux em `~/cansat-cpp/dados_voo/`.
+- **Porta ocupada:** verifica se já existe uma GS em execução. Não arranques as variantes UDP e serial em paralelo.
+- **Pacotes rejeitados:** confirma que o emissor envia CANSAT-TLM v1, inclui os campos obrigatórios e calcula o CRC32 sobre o objeto sem o campo `crc`.
+- **Erro ao iniciar o simulador no Windows:** usa `iniciar_simulador.bat` e confirma que g++ e as DLLs do MSYS2 estão instalados; para um MSYS2 fora de `C:\msys64`, adiciona `ucrt64\bin` ao PATH.

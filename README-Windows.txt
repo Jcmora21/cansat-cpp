@@ -2,9 +2,10 @@
                CANSAT GROUND STATION & SIMULATOR (WINDOWS)
 ====================================================================
 
-Este projeto contem a Ground Station multicansat e um simulador C++
-que representa cinco CanSats. A comunicacao usa o protocolo CANSAT-TLM
-v1 sobre UDP em 127.0.0.1:5005, com CRC32, ACKs e retransmissoes.
+Este projeto contem uma Ground Station que funciona com um ou varios
+CanSats e um simulador C++ que representa cinco unidades. A Ground Station
+principal e groundstation.py. A comunicacao usa CANSAT-TLM v1, com CRC32,
+ACKs e retransmissoes.
 
 --------------------------------------------------------------------
 1. FUNCIONALIDADES
@@ -30,7 +31,8 @@ v1 sobre UDP em 127.0.0.1:5005, com CRC32, ACKs e retransmissoes.
 --------------------------------------------------------------------
 
 cansat-cpp\
-├── groundstation.py        # Ground Station multicansat UDP
+├── groundstation.py        # Ground Station UDP para um ou varios CanSats
+├── groundstation_serial.py # A mesma GS atraves de serial/APC220
 ├── iniciar_cansat.bat      # Compila, inicia a GS e pergunta quando iniciar o simulador
 ├── FORMATO_TELEMETRIA.txt  # Estrutura e exemplo CANSAT-TLM v1
 ├── dados_voo\              # CSV de cada sessao, com cansat_id
@@ -53,8 +55,8 @@ No Windows (PowerShell ou CMD), garante que tens instalado:
    O script reconhece a instalacao padrao em C:\msys64; para outra pasta,
    adiciona a pasta ucrt64\bin do MSYS2 ao PATH do Windows.
 
-Instalacao da dependencia Python:
-  py -3 -m pip install websockets
+Instalacao das dependencias Python:
+  py -3 -m pip install websockets pyserial
 
 Se for necessario criar um ambiente virtual (venv):
   py -3 -m venv .venv
@@ -81,6 +83,7 @@ Executa o comando:
   py -3 groundstation.py
 
 - Servidores iniciados: UDP (5005), WebSocket (8051) e Web (8050).
+- O UDP escuta apenas em 127.0.0.1; para APC220, usa a variante serial.
 - Acede no navegador web ao endereco: http://127.0.0.1:8050
 
 PASSO 2: Compilar e Iniciar o Simulador (Terminal 2 - PowerShell/CMD)
@@ -92,12 +95,20 @@ Abre um segundo terminal e executa:
 
 (O script de compilacao liga automaticamente a biblioteca Winsock -lws2_32.)
 
-- O simulador gera dados para cinco CanSats e envia-os via UDP.
+- O simulador incluido gera cinco CanSats e envia os dados via UDP. A GS
+  tambem funciona se apenas um CanSat compativel estiver a transmitir.
 - A Ground Station valida o CRC32, confirma cada pacote valido com ACK,
   deteta duplicados/pacotes em falta e exporta o cansat_id para o CSV.
 - Acompanha os graficos em tempo real no navegador.
 - O botao "Pausar captura" suspende graficos e CSV sem interromper os ACKs;
   "Retomar captura" reativa a captura.
+
+Para usar APC220, liga o adaptador USB-serial e indica a porta COM e o
+baudrate configurado nos modulos, por exemplo:
+  py -3 groundstation_serial.py --port COM3 --baudrate 9600
+As mensagens, incluindo ACKs, sao objetos JSON terminados em newline.
+Nao inicies a GS UDP e a serial ao mesmo tempo: partilham as portas
+do painel Web e do WebSocket.
 
 --------------------------------------------------------------------
 5. COMO PARAR A EXECUCAO
@@ -126,5 +137,6 @@ Abre um segundo terminal e executa:
 --------------------------------------------------------------------
 
 - Ficheiros gerados no formato: voo_cansat_AAAA-MM-DD_HH-MM-SS.csv
-- Cada linha inclui cansat_id para distinguir os dados dos cinco CanSats.
+- Cada linha inclui cansat_id para distinguir os CanSats; ficheiros antigos
+  sem essa coluna continuam compativeis com o modo Replay.
 - Pasta de destino: .\dados_voo\

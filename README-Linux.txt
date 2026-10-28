@@ -2,9 +2,10 @@
                CANSAT GROUND STATION & SIMULATOR
 ====================================================================
 
-Este projeto contem a Ground Station multicansat e um simulador C++
-que representa cinco CanSats. A comunicacao usa CANSAT-TLM v1 sobre
-UDP em 127.0.0.1:5005, com CRC32, ACKs e retransmissoes.
+Este projeto contem uma Ground Station que funciona com um ou varios
+CanSats, e um simulador C++ que representa cinco unidades. A Ground
+Station principal e groundstation.py. A comunicacao usa CANSAT-TLM v1,
+com CRC32, ACKs e retransmissoes.
 
 --------------------------------------------------------------------
 1. FUNCIONALIDADES
@@ -29,13 +30,13 @@ UDP em 127.0.0.1:5005, com CRC32, ACKs e retransmissoes.
 --------------------------------------------------------------------
 
 cansat-cpp/
-├── groundstation.py         # Ground Station multicansat UDP
-├── groundstation_serial.py # Variante serial/APC220 da mesma GS
-├── entrar.sh               # Script de inicializacao Termux/Ubuntu
-├── dados_voo/              # Pasta onde sao gravados os ficheiros .csv
+├── groundstation.py        # Ground Station UDP para um ou varios CanSats
+├── groundstation_serial.py # A mesma GS atraves de serial/APC220
+├── FORMATO_TELEMETRIA.txt  # Formato e exemplo CANSAT-TLM com CRC
+├── dados_voo/              # CSV de cada sessao, incluindo cansat_id
 └── simulador/
-    ├── simulador.cpp       # Codigo-fonte do simulador em C++
-    └── compilar.sh         # Script para compilacao do simulador
+    ├── simulador.cpp       # Simulador de cinco CanSats
+    └── compilar.sh         # Script Linux para compilacao
 
 --------------------------------------------------------------------
 3. REQUISITOS E DEPENDENCIAS
@@ -43,12 +44,12 @@ cansat-cpp/
 
 No ambiente Linux/Ubuntu (via Termux/PROOT), garante as dependencias:
 
-- Python 3 (com a biblioteca websockets):
-  pip install websockets
+- Python 3 (dependencias da GS UDP e serial):
+  python3 -m pip install websockets pyserial
 
 - Compilador C++ (g++) e cabecalhos nlohmann-json:
-  sudo apt update && sudo apt install g++ nlohmann-json3-dev -y
-  No Termux: pkg install g++ nlohmann-json
+  Ubuntu/Debian: sudo apt update && sudo apt install g++ nlohmann-json3-dev
+  Termux: pkg install g++ nlohmann-json
 
 - Se for necessario criar um ambiente virtual (venv):
   [No Termux]: pkg install python python-pip
@@ -62,7 +63,7 @@ No ambiente Linux/Ubuntu (via Termux/PROOT), garante as dependencias:
 4. COMO EXECUTAR O SISTEMA
 --------------------------------------------------------------------
 
-A Estacao de Solo deve ser SEMPRE iniciada antes do Simulador.
+A Ground Station deve estar ativa antes de iniciar um simulador UDP.
 
 PASSO 1: Iniciar a Estacao de Solo (Terminal 1)
 -----------------------------------------------
@@ -70,6 +71,7 @@ Executa o comando:
   python3 groundstation.py
 
 - Servidores iniciados: UDP (5005), WebSocket (8051) e Web (8050).
+- O UDP escuta apenas em 127.0.0.1; para APC220, usa a variante serial.
 - Acede no navegador web ao endereco: http://127.0.0.1:8050
 
 PASSO 2: Compilar e Iniciar o Simulador (Terminal 2)
@@ -79,12 +81,19 @@ Abre um segundo terminal e executa:
   ./compilar.sh
   ./simulador
 
-- O simulador gera os dados e envia-os via UDP para a Ground Station.
+- O simulador incluido gera cinco CanSats e envia os dados por UDP. A GS
+  tambem funciona quando so um CanSat compativel esta a transmitir.
 - A GS valida CRC32 e campos, confirma pacotes validos com ACK e guarda o
   identificador cansat_id no CSV.
 - Acompanha os graficos em tempo real no navegador.
 - Usa o botao "Pausar captura" para suspender graficos/CSV sem parar os ACKs;
   "Retomar captura" reativa a captura.
+
+Para usar APC220, liga a porta USB-serial e executa, por exemplo:
+  python3 groundstation_serial.py --port /dev/ttyUSB0 --baudrate 9600
+Indica a porta e o baudrate do teu adaptador. As mensagens, incluindo ACKs,
+sao objetos JSON terminados em newline. Nao arranques em simultaneo a GS
+UDP e a serial, pois partilham as portas do painel e do WebSocket.
 
 --------------------------------------------------------------------
 5. COMO PARAR A EXECUCAO
@@ -107,5 +116,6 @@ Abre um segundo terminal e executa:
 --------------------------------------------------------------------
 
 - Ficheiros gerados no formato: voo_cansat_AAAA-MM-DD_HH-MM-SS.csv
-- Cada linha inclui cansat_id para distinguir os dados dos cinco CanSats.
+- Cada linha inclui cansat_id para distinguir os CanSats; os ficheiros
+  antigos sem esta coluna continuam compativeis com o modo Replay.
 - Pasta de destino: ~/cansat-cpp/dados_voo/
