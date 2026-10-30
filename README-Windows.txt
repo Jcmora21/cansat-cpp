@@ -36,6 +36,9 @@ ACKs e retransmissoes.
 cansat-cpp\
 ├── groundstation.py        # Ground Station UDP para um ou varios CanSats
 ├── groundstation_serial.py # A mesma GS atraves de serial/APC220
+├── web\
+│   └── index.html          # Interface Web da GS
+├── requirements.txt        # Dependencias Python da GS
 ├── iniciar_gs.bat          # Inicia a Ground Station e abre o painel Web
 ├── FORMATO_TELEMETRIA.txt  # Estrutura e exemplo CANSAT-TLM v1
 ├── dados_voo\              # CSV de cada sessao, com cansat_id
@@ -58,12 +61,12 @@ No Windows (PowerShell ou CMD), garante que tens instalado:
    adiciona a pasta ucrt64\bin do MSYS2 ao PATH do Windows.
 
 Instalacao das dependencias Python:
-  py -3 -m pip install websockets pyserial
+  py -3 -m pip install -r requirements.txt
 
 Se for necessario criar um ambiente virtual (venv):
   py -3 -m venv .venv
   .venv\Scripts\activate
-  python -m pip install websockets
+  python -m pip install -r requirements.txt
 O iniciar_gs.bat usa o venv ativo ou .venv\ automaticamente, se existir.
 
 --------------------------------------------------------------------

@@ -12,7 +12,7 @@ Este repositório contém uma Ground Station para telemetria de **um ou vários 
 - Botão **Pausar captura**: deixa de atualizar gráficos e CSV, mas continua a receber, validar e confirmar os pacotes com ACK. Os pacotes recebidos durante a pausa são descartados.
 - Históricos de voo e gráficos limitados a 2000 amostras em memória.
 - Exportação do CSV completo em modo LIVE, CSV/ZIP em modo replay e gráficos PNG; modo replay a partir de CSV.
-- Transporte UDP e variante serial para APC220.
+- Transporte UDP e variante serial para APC220. A página web está separada do código do servidor em `web/index.html`.
 
 ## Campos do pacote de telemetria
 
@@ -76,6 +76,9 @@ resultado é transmitido como hexadecimal. O ficheiro
 cansat-cpp/
 ├── groundstation.py
 ├── groundstation_serial.py
+├── web/
+│   └── index.html
+├── requirements.txt
 ├── FORMATO_TELEMETRIA.txt
 ├── iniciar_gs.bat
 ├── README.md
@@ -91,10 +94,10 @@ cansat-cpp/
 
 ### Linux / Ubuntu / Termux
 
-Instala Python 3 e as dependências:
+Instala Python 3 e as dependências Python a partir da raiz do projeto:
 
 ```bash
-python3 -m pip install websockets pyserial
+python3 -m pip install -r requirements.txt
 ```
 
 Para compilar o simulador, instala `g++` e os cabeçalhos nlohmann-json:
@@ -120,10 +123,10 @@ pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nlohmann-json
 Instala a dependência da GS:
 
 ```powershell
-py -3 -m pip install websockets
+py -3 -m pip install -r requirements.txt
 ```
 
-Para APC220 no Windows, instala também `pyserial` com `py -3 -m pip install pyserial`.
+O `pyserial` só é usado pela variante APC220; instalá-lo através do ficheiro de requisitos permite preparar ambas as variantes de uma só vez.
 
 ## Executar em Linux
 

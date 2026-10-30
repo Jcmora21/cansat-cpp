@@ -18,12 +18,15 @@ com CRC32, ACKs e retransmissoes.
 - Metricas de Voo e KPIs: Exibicao automatica dos valores Minimo,
   Maximo e Media no topo de cada grafico.
 - Gravacao Automatica em CSV: Salvamento instantaneo dos pacotes na
-  pasta dados_voo/.
+  pasta dados_voo/. Termina 30 segundos depois de todos os CanSats
+  detetados reportarem aterragem (estado SOLO e altitude ate 0,1 m).
 - Botao para pausar/retomar a captura: os ACKs continuam ativos durante
   a pausa, mas graficos e CSV ignoram os pacotes recebidos nesse periodo.
 - Historicos limitados a 2000 amostras.
-- Exportacao de Dados: Descarga direta do historico em .csv ou
-  captura em imagem .png dos graficos.
+- Depois do fim da gravacao automatica, a telemetria continua visivel.
+  Em modo LIVE, Exportar CSV descarrega o ficheiro completo da sessao.
+- Exportacao em modo replay: CSV/ZIP; captura em imagem .png dos graficos.
+- Pagina web em web/index.html, separada do servidor Python.
 
 --------------------------------------------------------------------
 2. ESTRUTURA DO PROJETO
@@ -32,6 +35,9 @@ com CRC32, ACKs e retransmissoes.
 cansat-cpp/
 ├── groundstation.py        # Ground Station UDP para um ou varios CanSats
 ├── groundstation_serial.py # A mesma GS atraves de serial/APC220
+├── web/
+│   └── index.html          # Interface Web da GS
+├── requirements.txt        # Dependencias Python da GS
 ├── FORMATO_TELEMETRIA.txt  # Formato e exemplo CANSAT-TLM com CRC
 ├── dados_voo/              # CSV de cada sessao, incluindo cansat_id
 └── simulador/
@@ -45,7 +51,7 @@ cansat-cpp/
 No ambiente Linux/Ubuntu (via Termux/PROOT), garante as dependencias:
 
 - Python 3 (dependencias da GS UDP e serial):
-  python3 -m pip install websockets pyserial
+  python3 -m pip install -r requirements.txt
 
 - Compilador C++ (g++) e cabecalhos nlohmann-json:
   Ubuntu/Debian: sudo apt update && sudo apt install g++ nlohmann-json3-dev
@@ -88,6 +94,11 @@ Abre um segundo terminal e executa:
 - Acompanha os graficos em tempo real no navegador.
 - Usa o botao "Pausar captura" para suspender graficos/CSV sem parar os ACKs;
   "Retomar captura" reativa a captura.
+- A gravacao automatica termina 30 segundos depois da aterragem de todos os
+  CanSats detetados (estado SOLO e altitude ate 0,1 m). A visualizacao
+  continua; "Exportar CSV" em modo LIVE descarrega o CSV completo da sessao.
+- O script simulador/compilar.sh compila a partir da pasta do proprio script,
+  por isso o repositorio pode estar instalado em qualquer local.
 
 Para usar APC220, liga a porta USB-serial e executa, por exemplo:
   python3 groundstation_serial.py --port /dev/ttyUSB0 --baudrate 9600
