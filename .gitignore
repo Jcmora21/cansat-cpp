@@ -3,6 +3,7 @@ pip/
 *.o
 moc_*
 groundstation
+Sensores/CanSat/build/
 simulador/simulador
 simulador/simulador.exe
 estacao/estacao

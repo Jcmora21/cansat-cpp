@@ -66,6 +66,15 @@ csv_headers = [
     "pitch",
     "roll",
     "yaw",
+    "gas_resistance_kohm",
+    "oxygen_percent",
+    "sound_rms_adc",
+    "sound_level_dbfs",
+    "mag_x",
+    "mag_y",
+    "mag_z",
+    "heading",
+    "sensor_status",
     "rssi",
     "snr",
 ]
@@ -193,15 +202,33 @@ def validate_telemetry_packet(packet):
 
     for field in REQUIRED_DATA_FIELDS:
         value = data[field]
+        if value is None:
+            continue
         if field == "parachute":
             if type(value) is not bool:
                 return False, [f"data.{field}"]
         elif not is_finite_number(value):
             return False, [f"data.{field}"]
 
+    optional_numeric_data_fields = (
+        "gas_resistance_kohm",
+        "oxygen_percent",
+        "sound_rms_adc",
+        "sound_level_dbfs",
+        "mag_x",
+        "mag_y",
+        "mag_z",
+        "heading",
+    )
+    for field in optional_numeric_data_fields:
+        if field in data and data[field] is not None and not is_finite_number(data[field]):
+            return False, [f"data.{field}"]
+    if "sensor_status" in data and not isinstance(data["sensor_status"], str):
+        return False, ["data.sensor_status"]
+
     for field in REQUIRED_LINK_FIELDS:
         value = link[field]
-        if not is_finite_number(value):
+        if value is not None and not is_finite_number(value):
             return False, [f"link.{field}"]
 
     return True, []
@@ -582,6 +609,15 @@ def transport_receiver(transport_factory=UDPTransport):
                 "roll": data_block.get("roll"),
                 "yaw": data_block.get("yaw"),
                 "paraquedas": data_block.get("parachute", False),
+                "gas_resistance_kohm": data_block.get("gas_resistance_kohm"),
+                "oxygen_percent": data_block.get("oxygen_percent"),
+                "sound_rms_adc": data_block.get("sound_rms_adc"),
+                "sound_level_dbfs": data_block.get("sound_level_dbfs"),
+                "mag_x": data_block.get("mag_x"),
+                "mag_y": data_block.get("mag_y"),
+                "mag_z": data_block.get("mag_z"),
+                "heading": data_block.get("heading"),
+                "sensor_status": data_block.get("sensor_status"),
                 "rssi": link_block.get("rssi"),
                 "snr": link_block.get("snr"),
             }

@@ -22,10 +22,12 @@ para uso interno no painel e no CSV. Os campos listados são os nomes exatos
 esperados no protocolo.
 
 Todos os campos de topo são obrigatórios. Dentro de `data`, todos os campos
-indicados são obrigatórios; em `link`, `rssi` e `snr` são obrigatórios e
-`packet_loss` é opcional para a GS. Os campos numéricos devem conter um número
-JSON finito (inteiro ou decimal); `parachute` tem de ser booleano. O campo
-`crc` também é necessário para a GS aceitar o pacote.
+base indicados são obrigatórios, mas uma medição pode ser `null` se o sensor
+não existir ou não tiver produzido uma leitura válida. Em `link`, `rssi` e
+`snr` são obrigatórios e podem ser `null` quando o rádio não fornece essas
+métricas; `packet_loss` é opcional. O campo `crc` também é necessário para a
+GS aceitar o pacote. Campos científicos adicionais em `data` são opcionais;
+os atuais incluem O₂, som, resistência do gás e magnetómetro.
 
 | Campo | Descrição | Formato (tipo de valor) | Exemplo |
 |---|---|---|---|
@@ -59,9 +61,16 @@ JSON finito (inteiro ou decimal); `parachute` tem de ser booleano. O campo
 | `data.pitch` | Atitude de arfagem. O simulador expressa em graus. | Número finito | `88.2` |
 | `data.roll` | Atitude de rolamento. O simulador expressa em graus. | Número finito | `135.0` |
 | `data.yaw` | Atitude de guinada. O simulador expressa em graus. | Número finito | `45.0` |
-| `data.parachute` | Indica se o paraquedas está aberto. | Booleano (`true`/`false`) | `false` |
-| `link.rssi` | Potência do sinal recebido. O simulador expressa em dBm. | Número finito | `-78.5` |
-| `link.snr` | Relação sinal/ruído. O simulador expressa em dB. | Número finito | `9.4` |
+| `data.parachute` | Indica se o paraquedas está aberto; `null` quando não é medido. | Booleano (`true`/`false`) ou `null` | `false` |
+| `data.gas_resistance_kohm` | Resistência do sensor de gás do BME680. | Número finito; opcional | `54.2` |
+| `data.oxygen_percent` | Concentração de O₂ indicada pelo Gravity SEN0465, em percentagem de volume. | Número finito; opcional | `20.9` |
+| `data.sound_rms_adc` | RMS do sinal do microfone em contagens ADC; não é nível acústico calibrado. | Número finito; opcional | `18.4` |
+| `data.sound_level_dbfs` | Nível relativo ao fundo de escala digital; não é dB SPL. | Número finito; opcional | `-38.2` |
+| `data.mag_x`, `data.mag_y`, `data.mag_z` | Componentes do campo magnético do HMC5883L. | Número finito; opcional | `39.4` |
+| `data.heading` | Rumo magnético horizontal calculado sem compensação de inclinação. | Número finito; opcional | `12.5` |
+| `data.sensor_status` | Estado de inicialização dos sensores no CanSat. | Texto; opcional | `"bme680=ok;sgp30=ok"` |
+| `link.rssi` | Potência do sinal recebido. O simulador expressa em dBm; `null` se não disponível. | Número finito ou `null` | `-78.5` |
+| `link.snr` | Relação sinal/ruído. O simulador expressa em dB; `null` se não disponível. | Número finito ou `null` | `9.4` |
 | `link.packet_loss` | Estimativa da perda de pacotes reportada pelo emissor. O simulador envia `0.0` ou `2.5`. | Número finito; opcional | `0.0` |
 
 `data` e `link` têm de ser objetos JSON com os respetivos campos, não texto
@@ -70,12 +79,22 @@ representação usada para o cálculo ordena as chaves e remove espaços, e o
 resultado é transmitido como hexadecimal. O ficheiro
 [FORMATO_TELEMETRIA.txt](FORMATO_TELEMETRIA.txt) contém pacotes de exemplo.
 
+O firmware integrado atual está em [Sensores/CanSat/CanSat.ino](Sensores/CanSat/CanSat.ino).
+Instruções de bibliotecas, pinos e teste por USB estão em
+[Sensores/CanSat/README.md](Sensores/CanSat/README.md). Os emissores antigos
+continuam aceites; a HuskyLens, gráficos científicos e ligação APC220 do novo
+firmware ficam para etapas posteriores.
+
 ## Estrutura
 
 ```text
 cansat-cpp/
 ├── groundstation.py
 ├── groundstation_serial.py
+├── Sensores/
+│   └── CanSat/
+│       ├── CanSat.ino
+│       └── README.md
 ├── web/
 │   └── index.html
 ├── requirements.txt
