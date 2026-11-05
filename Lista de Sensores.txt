@@ -9,3 +9,7 @@
 5. GUVA-S12SD -> Luz UV - (https://www.botnroll.com/pt/luz-imagem/2360-sensor-uv-waveshare.html)
 
 6. HuskyLens 1 -> Câmera IA - (https://www.dfrobot.com/huskylens/huskylens)
+
+7. MAX4466 -> Microfone - (https://www.botnroll.com/pt/som/5455-m-dulo-microfone-com-amplificador-max4466-de-ganho-ajust-vel.html)
+
+8. Gravity -> O2 - (https://www.botnroll.com/pt/biometricos/4463-gravity-sensor-de-oxig-nio-o2-calibrado-i2c-uart.html)
