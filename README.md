@@ -85,8 +85,9 @@ Instruções de bibliotecas, pinos e teste por USB estão em
 [Sensores/CanSat/README.md](Sensores/CanSat/README.md). Os emissores antigos
 continuam aceites; os gráficos de O2 e som já estão disponíveis na GS. A
 GS também inclui um widget **Sensores** com o estado e as respetivas
-medições; a HuskyLens e a ligação APC220 do novo firmware ficam para etapas
-posteriores.
+medições. O firmware transmite até cinco pacotes por segundo; alguns sensores
+atualizam a uma frequência inferior e mantêm o último valor medido. A
+HuskyLens e a ligação APC220 do novo firmware ficam para etapas posteriores.
 
 ## Estrutura
 

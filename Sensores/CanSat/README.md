@@ -1,8 +1,11 @@
 # Firmware integrado dos sensores
 
-`CanSat.ino` foi preparado para a placa **ESP32-C6 Dev Module** e envia uma
-linha JSON CANSAT-TLM v1 por segundo pela porta USB serial a 115200 baud. A
-linha pode ser recebida pela variante serial da GS. Nesta fase a câmara
+`CanSat.ino` foi preparado para a placa **ESP32-C6 Dev Module** e envia até
+cinco linhas JSON CANSAT-TLM v1 por segundo pela porta USB serial a 115200
+baud. A cadência pretendida é uma linha a cada 200 ms. O BME680 é lido de
+forma assíncrona para não bloquear o ciclo; o SGP30 atualiza eCO₂/TVOC a 1 Hz,
+mantendo o último valor nas linhas entre atualizações. A linha pode ser
+recebida pela variante serial da GS. Nesta fase a câmara
 HuskyLens fica intencionalmente adiada, e a ligação APC220 fica por definir.
 
 ## Bibliotecas Arduino
@@ -43,7 +46,9 @@ sensores I2C partilham o mesmo barramento configurado a 100 kHz.
 ## Dados e limitações nesta fase
 
 - `altitude` é relativa à pressão medida no arranque; `velocity` e
-  `acceleration` são derivadas de amostras de altitude barométrica.
+  `acceleration` são derivadas de amostras de altitude barométrica. A
+  telemetria é transmitida até 5 Hz; alguns sensores atualizam a uma frequência
+  inferior e o pacote repete o último valor disponível.
 - `oxygen_percent` representa a concentração reportada pelo SEN0465 em
   percentagem de volume; humidade e oxigénio são transmitidos arredondados a
   duas casas decimais. `gas_resistance_kohm` é a resistência do sensor de gás

@@ -1,6 +1,6 @@
 /*
   CanSat sensor integration for ESP32-C6 Dev Module.
-  USB serial outputs one CANSAT-TLM v1 JSON packet per second.
+  USB serial outputs five CANSAT-TLM v1 JSON packets per second.
 */
 
 #include <Wire.h>
@@ -26,7 +26,8 @@ constexpr uint8_t BME_MISO = 20;
 constexpr uint8_t BME_CS = 21;
 
 constexpr uint8_t O2_I2C_ADDRESS = 0x74;
-constexpr uint32_t TELEMETRY_INTERVAL_MS = 1000;
+constexpr uint32_t TELEMETRY_INTERVAL_MS = 200;
+constexpr uint32_t SGP30_INTERVAL_MS = 1000;
 constexpr float UV_ZERO_MV = 6.0f;
 constexpr float UV_TEN_MV = 900.0f;
 constexpr uint16_t MIC_SAMPLE_COUNT = 500;
@@ -43,9 +44,12 @@ bool sgpAvailable = false;
 bool tslAvailable = false;
 bool magnetometerAvailable = false;
 bool oxygenAvailable = false;
+bool bmeReadingPending = false;
 float launchPressureHpa = 1013.25f;
 uint32_t sequenceNumber = 0;
 uint32_t previousSampleTime = 0;
+uint32_t previousSgp30Time = 0;
+uint32_t bmeReadingReadyAt = 0;
 uint32_t previousAltitudeTime = 0;
 float previousAltitude = 0.0f;
 float previousVelocity = 0.0f;
@@ -72,6 +76,8 @@ struct TelemetrySample {
   float magZ = NAN;
   float heading = NAN;
 };
+
+TelemetrySample latestTelemetrySample;
 
 uint32_t crc32(const char *text) {
   uint32_t crc = 0xFFFFFFFFUL;
@@ -140,37 +146,53 @@ void initializeSensors() {
 }
 
 void readBme680(TelemetrySample &sample, uint32_t now) {
-  if (!bmeAvailable || !bme.performReading() || bme.pressure <= 0.0f) {
+  if (!bmeAvailable) {
     return;
   }
 
-  sample.temperature = bme.temperature;
-  sample.humidity = roundToTwoDecimals(bme.humidity);
-  sample.pressure = bme.pressure / 100.0f;
-  sample.altitude = bme.readAltitude(launchPressureHpa);
-  sample.gasResistanceKohm = bme.gas_resistance / 1000.0f;
+  if (bmeReadingPending &&
+      static_cast<int32_t>(now - bmeReadingReadyAt) >= 0) {
+    if (bme.endReading() && bme.pressure > 0.0f) {
+      sample.temperature = bme.temperature;
+      sample.humidity = roundToTwoDecimals(bme.humidity);
+      sample.pressure = bme.pressure / 100.0f;
+      sample.altitude = bme.readAltitude(launchPressureHpa);
+      sample.gasResistanceKohm = bme.gas_resistance / 1000.0f;
 
-  if (previousAltitudeValid) {
-    const uint32_t elapsedMs = now - previousAltitudeTime;
-    if (elapsedMs > 0) {
-      const float elapsedSeconds = elapsedMs / 1000.0f;
-      sample.velocity = (sample.altitude - previousAltitude) / elapsedSeconds;
-      if (previousVelocityValid) {
-        sample.acceleration =
-            (sample.velocity - previousVelocity) / elapsedSeconds;
+      if (previousAltitudeValid) {
+        const uint32_t elapsedMs = now - previousAltitudeTime;
+        if (elapsedMs > 0) {
+          const float elapsedSeconds = elapsedMs / 1000.0f;
+          sample.velocity = (sample.altitude - previousAltitude) / elapsedSeconds;
+          if (previousVelocityValid) {
+            sample.acceleration =
+                (sample.velocity - previousVelocity) / elapsedSeconds;
+          }
+          previousVelocity = sample.velocity;
+          previousVelocityValid = true;
+        }
       }
-      previousVelocity = sample.velocity;
-      previousVelocityValid = true;
+
+      previousAltitude = sample.altitude;
+      previousAltitudeTime = now;
+      previousAltitudeValid = true;
     }
+    bmeReadingPending = false;
   }
 
-  previousAltitude = sample.altitude;
-  previousAltitudeTime = now;
-  previousAltitudeValid = true;
+  if (!bmeReadingPending) {
+    bmeReadingReadyAt = bme.beginReading();
+    bmeReadingPending = bmeReadingReadyAt != 0;
+  }
 }
 
-void readSgp30(TelemetrySample &sample) {
-  if (sgpAvailable && sgp.IAQmeasure()) {
+void readSgp30(TelemetrySample &sample, uint32_t now) {
+  if (!sgpAvailable || now - previousSgp30Time < SGP30_INTERVAL_MS) {
+    return;
+  }
+  previousSgp30Time = now;
+
+  if (sgp.IAQmeasure()) {
     sample.eco2 = sgp.eCO2;
     sample.tvoc = sgp.TVOC;
   }
@@ -326,6 +348,7 @@ void setup() {
   Serial.begin(115200);
   initializeSensors();
   previousSampleTime = millis() - TELEMETRY_INTERVAL_MS;
+  previousSgp30Time = millis() - SGP30_INTERVAL_MS;
 }
 
 void loop() {
@@ -340,13 +363,14 @@ void loop() {
   }
   previousSampleTime = now;
 
-  TelemetrySample sample;
+  TelemetrySample sample = latestTelemetrySample;
   readBme680(sample, now);
-  readSgp30(sample);
+  readSgp30(sample, now);
   readTsl2561(sample);
   readMagnetometer(sample);
   readUv(sample);
   readOxygen(sample);
   readMicrophone(sample);
+  latestTelemetrySample = sample;
   sendTelemetry(sample, now);
 }
