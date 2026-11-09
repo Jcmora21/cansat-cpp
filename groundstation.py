@@ -40,6 +40,7 @@ capture_enabled = True
 csv_logging_enabled = True
 discarded_while_paused = 0
 MAX_FLIGHT_HISTORY = 2000
+CSV_DELIMITER = ";"
 
 csv_headers = [
     "id",
@@ -81,8 +82,8 @@ csv_headers = [
 
 
 def init_csv(filename):
-    with open(filename, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
+    with open(filename, mode="w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f, delimiter=CSV_DELIMITER)
         writer.writerow(csv_headers)
 
 
@@ -706,7 +707,7 @@ def transport_receiver(transport_factory=UDPTransport):
                 if csv_logging_enabled:
                     row = [parsed.get(header, "") for header in csv_headers]
                     with open(csv_filename, mode="a", newline="", encoding="utf-8") as file:
-                        csv.writer(file).writerow(row)
+                        csv.writer(file, delimiter=CSV_DELIMITER).writerow(row)
 
                 if cansat_id is not None:
                     with cansats_lock:

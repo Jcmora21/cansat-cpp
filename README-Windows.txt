@@ -139,6 +139,9 @@ do painel Web e do WebSocket.
 --------------------------------------------------------------------
 
 - Ficheiros gerados no formato: voo_cansat_AAAA-MM-DD_HH-MM-SS.csv
+- CSV novo usa ponto e virgula como separador e UTF-8 com BOM, para abrir as
+  colunas corretamente no Excel com configuracao regional portuguesa.
 - Cada linha inclui cansat_id para distinguir os CanSats; ficheiros antigos
-  sem essa coluna continuam compativeis com o modo Replay.
+  sem essa coluna e CSV antigos separados por virgula continuam compativeis
+  com o modo Replay.
 - Pasta de destino: .\dados_voo\

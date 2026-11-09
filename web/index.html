@@ -1949,16 +1949,45 @@ function selectCansat(id) {
         }
 
         function parseCSV(text) {
-            const lines = text.trim().split(/\r?\n/);
+            const normalizedText = text.replace(/^\uFEFF/, '').trim();
+            const lines = normalizedText.split(/\r?\n/);
             if (lines.length < 2) return [];
 
-            const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+            const delimiter = (lines[0].match(/;/g) || []).length >
+                (lines[0].match(/,/g) || []).length ? ';' : ',';
+            const parseRow = line => {
+                const values = [];
+                let value = '';
+                let quoted = false;
+
+                for (let index = 0; index < line.length; index++) {
+                    const character = line[index];
+                    if (character === '"') {
+                        if (quoted && line[index + 1] === '"') {
+                            value += '"';
+                            index++;
+                        } else {
+                            quoted = !quoted;
+                        }
+                    } else if (character === delimiter && !quoted) {
+                        values.push(value);
+                        value = '';
+                    } else {
+                        value += character;
+                    }
+                }
+
+                values.push(value);
+                return values;
+            };
+            const headers = parseRow(lines[0]).map(h => h.trim().toLowerCase());
             const hasCansatId = headers.includes('cansat_id');
 
             const rows = [];
 
             for (let i = 1; i < lines.length; i++) {
-                const cols = lines[i].split(',');
+                if (!lines[i].trim()) continue;
+                const cols = parseRow(lines[i]);
                 const obj = {};
 
                 headers.forEach((h, idx) => {
@@ -2256,8 +2285,9 @@ function selectCansat(id) {
                 const text = String(value);
 
                 if (
-                    text.includes(",") ||
+                    text.includes(";") ||
                     text.includes('"') ||
+                    text.includes("\r") ||
                     text.includes("\n")
                 ) {
                     return `"${text.replace(/"/g, '""')}"`;
@@ -2267,15 +2297,15 @@ function selectCansat(id) {
             }
 
             function createCSV(rows) {
-                let csv = headers.join(",") + "\n";
+                let csv = headers.join(";") + "\n";
 
                 rows.forEach(row => {
                     csv += headers
                         .map(header => escapeCSV(row[header]))
-                        .join(",") + "\n";
+                        .join(";") + "\n";
                 });
 
-                return csv;
+                return "\uFEFF" + csv;
             }
 
             // CSV GERAL
