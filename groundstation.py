@@ -75,6 +75,7 @@ csv_headers = [
     "mag_y",
     "mag_z",
     "heading",
+    "sea_level_pressure_hpa",
     "sensor_status",
     "rssi",
     "snr",
@@ -220,6 +221,7 @@ def validate_telemetry_packet(packet):
         "mag_y",
         "mag_z",
         "heading",
+        "sea_level_pressure_hpa",
     )
     for field in optional_numeric_data_fields:
         if field in data and data[field] is not None and not is_finite_number(data[field]):
@@ -517,6 +519,12 @@ def transport_receiver(transport_factory=UDPTransport):
 
         if packet.get("type") == "command_ack":
             if verify_packet_crc(packet):
+                emit_event({
+                    "type": "command_ack",
+                    "cansat_id": packet.get("cansat_id"),
+                    "command": packet.get("command"),
+                    "status": packet.get("status"),
+                })
                 print(
                     f"Resposta de comando recebida (CanSat "
                     f"{packet.get('cansat_id', '?')}, "
@@ -618,6 +626,9 @@ def transport_receiver(transport_factory=UDPTransport):
                 "mag_y": data_block.get("mag_y"),
                 "mag_z": data_block.get("mag_z"),
                 "heading": data_block.get("heading"),
+                "sea_level_pressure_hpa": data_block.get(
+                    "sea_level_pressure_hpa"
+                ),
                 "sensor_status": data_block.get("sensor_status"),
                 "rssi": link_block.get("rssi"),
                 "snr": link_block.get("snr"),

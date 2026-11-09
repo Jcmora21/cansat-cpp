@@ -36,18 +36,18 @@ class SerialTransport:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Ground Station CANSAT-TLM através de uma porta serial APC220"
+        description="Ground Station CANSAT-TLM através de uma porta serial"
     )
     parser.add_argument(
         "--port",
         default="/dev/ttyUSB0",
-        help="porta serial do adaptador ligado ao APC220 (default: %(default)s)",
+        help="porta serial (COM5, /dev/ttyUSB0; default: %(default)s)",
     )
     parser.add_argument(
         "--baudrate",
         type=int,
-        default=9600,
-        help="baudrate configurado nos dois APC220 (default: %(default)s)",
+        default=115200,
+        help="baudrate da ligação serial (default: %(default)s; APC220 normalmente usa 9600)",
     )
     return parser.parse_args()
 
@@ -66,6 +66,6 @@ if __name__ == "__main__":
     transport_factory = create_serial_transport(args.port, args.baudrate)
     print(
         f"[Serial] Porta {args.port} aberta a {args.baudrate} baud; "
-        "aguardando linhas JSON do APC220..."
+        "aguardando linhas JSON..."
     )
     asyncio.run(main(transport_factory))

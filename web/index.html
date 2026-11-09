@@ -346,6 +346,25 @@
         </div>
     </div>
 
+    <div class="telemetry-card">
+        <h3>📏 Referência de pressão para altitude</h3>
+        <div style="display:flex;align-items:end;gap:10px;flex-wrap:wrap;">
+            <label for="p0Input" style="display:flex;flex-direction:column;gap:4px;font-size:0.85em;color:#cbd5e1;">
+                P0 ao nível do mar (hPa)
+                <input id="p0Input" type="number" min="100" max="1200" step="0.01" value="1013.25"
+                       style="background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:8px;">
+            </label>
+            <span id="p0Target" style="font-size:0.85em;color:#94a3b8;">CanSat destino: à espera de telemetria</span>
+            <button class="btn btn-export" id="btnSetP0" onclick="sendP0Command()">Aplicar P0</button>
+            <span id="p0CommandStatus" role="status" style="font-size:0.85em;color:#94a3b8;"></span>
+        </div>
+        <div style="font-size:0.78em;color:#64748b;margin-top:8px;">
+            Introduz a pressão de referência ao nível do mar em hPa. O CanSat selecionado
+            (ou o último a transmitir) calcula a altitude barométrica usando este valor.
+            Intervalo aceite: 100–1200 hPa.
+        </div>
+    </div>
+
     <!-- Painel de Telemetria Completa no Topo -->
     <div class="telemetry-card">
         <h3>📊 Telemetria Completa ao Vivo</h3>
@@ -1133,6 +1152,8 @@ const cansatData = {};
 
 let selectedCansat = null;
 let viewMode = 'general';
+let latestCansatId = null;
+let pendingP0CansatId = null;
 
 const cansatOfflinePeriods = {};
 
@@ -1555,6 +1576,7 @@ function selectCansat(id) {
     selectedCansat = id;
     viewMode = 'cansat';
     document.getElementById('selectedCansat').textContent = `🛰️ CanSat ${id} selecionado`;
+    updateP0Target();
     rebuildChartsForSelectedCansat();
     console.log("CanSat selecionado:", selectedCansat);
 }
@@ -1671,6 +1693,11 @@ function selectCansat(id) {
             }
             
             updateCansatOverview(data);
+
+            if (data.cansat_id !== undefined && data.cansat_id !== null) {
+                latestCansatId = data.cansat_id;
+                updateP0Target();
+            }
             
             if (data.cansat_id !== undefined && data.cansat_id !== null) {
                 if (!cansatData[data.cansat_id]) {
@@ -1732,6 +1759,13 @@ function selectCansat(id) {
             updateWind(data);
             updateHabitability(data);
             updateSensorWidget(data);
+            if (data.sea_level_pressure_hpa !== undefined &&
+                data.sea_level_pressure_hpa !== null) {
+                const p0Input = document.getElementById('p0Input');
+                if (document.activeElement !== p0Input) {
+                    p0Input.value = Number(data.sea_level_pressure_hpa).toFixed(2);
+                }
+            }
 
             const fields = {
                 "Pacote ID": data.id,
@@ -1744,6 +1778,7 @@ function selectCansat(id) {
                 "Temperatura": formatTelemetryValue(data.temperatura, "°C"),
                 "Humidade": formatTelemetryValue(data.humidade, "%", 2),
                 "Pressão": formatTelemetryValue(data.pressao, "hPa"),
+                "P0 nível do mar": formatTelemetryValue(data.sea_level_pressure_hpa, "hPa"),
                 "eCO2": formatTelemetryValue(data.eco2, "ppm"),
                 "TVOC": formatTelemetryValue(data.tvoc, "ppb"),
                 "Índice UV": formatTelemetryValue(data.uv, '', 2),
@@ -1789,6 +1824,48 @@ function selectCansat(id) {
 
         // ========== WebSocket (LIVE) ==========
         const ws = new WebSocket("ws://" + window.location.hostname + ":8051");
+
+        function updateP0Target() {
+            const target = selectedCansat ?? latestCansatId;
+            const label = document.getElementById('p0Target');
+            if (label) {
+                label.textContent = target === null
+                    ? 'CanSat destino: à espera de telemetria'
+                    : `CanSat destino: ${target}${selectedCansat === null ? ' (último a transmitir)' : ' (selecionado)'}`;
+            }
+        }
+
+        function sendP0Command() {
+            const status = document.getElementById('p0CommandStatus');
+            const value = Number(document.getElementById('p0Input').value);
+            const cansatId = selectedCansat ?? latestCansatId;
+
+            if (currentMode !== 'live') {
+                status.textContent = 'Muda para LIVE para enviar P0.';
+                return;
+            }
+            if (ws.readyState !== WebSocket.OPEN) {
+                status.textContent = 'Sem ligação à Ground Station.';
+                return;
+            }
+            if (cansatId === null || cansatId === undefined) {
+                status.textContent = 'Ainda não foi detetado nenhum CanSat.';
+                return;
+            }
+            if (!Number.isFinite(value) || value < 100 || value > 1200) {
+                status.textContent = 'P0 inválida: usa um valor entre 100 e 1200 hPa.';
+                return;
+            }
+
+            const command = `set_p0:${value.toFixed(2)}`;
+            pendingP0CansatId = cansatId;
+            status.textContent = `A enviar ${value.toFixed(2)} hPa para o CanSat ${cansatId}…`;
+            ws.send(JSON.stringify({
+                type: 'command',
+                cansat_id: cansatId,
+                command
+            }));
+        }
 
         ws.onopen = () => {
             if (currentMode === 'live') {
@@ -1894,6 +1971,25 @@ function selectCansat(id) {
                 } else if (message.type === "packet_status") {
                     updatePacketCounters(message.cansat_id, message.packet_counts);
                     renderCansatOverview();
+                } else if (message.type === "command_status") {
+                    if (message.cansat_id === pendingP0CansatId) {
+                        document.getElementById('p0CommandStatus').textContent =
+                            message.status === 'sent'
+                                ? 'Comando enviado; a aguardar confirmação do CanSat.'
+                                : `Falha ao enviar comando (${message.reason || 'erro'}).`;
+                        if (message.status !== 'sent') pendingP0CansatId = null;
+                    }
+                } else if (message.type === "command_ack") {
+                    const status = document.getElementById('p0CommandStatus');
+                    if (message.cansat_id !== pendingP0CansatId ||
+                        message.command === undefined ||
+                        !message.command.startsWith('set_p0:')) {
+                        return;
+                    }
+                    status.textContent = message.status === 'applied'
+                        ? `P0 ${message.command.slice(7)} hPa aplicada no CanSat ${message.cansat_id}.`
+                        : `CanSat ${message.cansat_id} rejeitou o valor de P0.`;
+                    pendingP0CansatId = null;
                 } else {
                     processPacket(message, false);
                 }
@@ -2271,6 +2367,7 @@ function selectCansat(id) {
                 "mag_y",
                 "mag_z",
                 "heading",
+                "sea_level_pressure_hpa",
                 "sensor_status",
                 "paraquedas",
                 "rssi",

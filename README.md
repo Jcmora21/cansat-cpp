@@ -49,6 +49,7 @@ os atuais incluem O₂, som, resistência do gás e magnetómetro.
 | `data.temperature` | Temperatura. O simulador expressa em °C. | Número finito | `18.2` |
 | `data.humidity` | Humidade relativa. O simulador expressa em percentagem. | Número finito | `55.0` |
 | `data.pressure` | Pressão atmosférica. O simulador expressa em hPa. | Número finito | `995.8` |
+| `data.sea_level_pressure_hpa` | Pressão de referência P0 usada pelo CanSat para calcular altitude; opcional para emissores antigos. | Número finito; opcional | `1013.25` |
 | `data.eco2` | Concentração equivalente de CO₂. O simulador expressa em ppm. | Número finito | `415` |
 | `data.tvoc` | Compostos orgânicos voláteis totais. O simulador expressa em ppb. | Número finito | `10` |
 | `data.uv` | Índice ultravioleta. | Número finito | `3.7` |
@@ -85,9 +86,12 @@ Instruções de bibliotecas, pinos e teste por USB estão em
 [Sensores/CanSat/README.md](Sensores/CanSat/README.md). Os emissores antigos
 continuam aceites; os gráficos de O2 e som já estão disponíveis na GS. A
 GS também inclui um widget **Sensores** com o estado e as respetivas
-medições. O firmware transmite até cinco pacotes por segundo; alguns sensores
-atualizam a uma frequência inferior e mantêm o último valor medido. A
-HuskyLens e a ligação APC220 do novo firmware ficam para etapas posteriores.
+medições. O firmware transmite três pacotes por segundo, atualiza o BME680 a
+5 Hz e o SGP30 a 1 Hz; cada pacote leva o último valor guardado por sensor.
+Na GS, o campo **P0 ao nível do mar (hPa)** configura a referência usada pelo
+ESP32 para calcular altitude; o valor inicial é 1013,25 hPa e a alteração não
+persiste após reiniciar. A HuskyLens e a ligação APC220 do novo firmware ficam
+para etapas posteriores.
 
 ## Estrutura
 
@@ -180,15 +184,27 @@ O simulador deve ser iniciado depois da Ground Station. A janela do simulador pe
 
 `iniciar_gs.bat` usa o ambiente virtual ativo ou o `.venv` do projeto, se existir. `iniciar_simulador.bat` prepara o PATH das DLLs do MSYS2. A instalação padrão esperada é `C:\msys64`; se usares outra pasta, adiciona `ucrt64\bin` ao PATH do Windows.
 
-## APC220 (serial)
+## Serial (USB direto ou APC220)
 
-Liga o APC220 do PC a uma porta USB-serial e inicia a variante que reutiliza a mesma Ground Station e o mesmo painel:
+Para ligar o ESP32 diretamente por USB, fecha primeiro o Serial Monitor do
+Arduino IDE e inicia a GS na porta COM da placa:
+
+```powershell
+py -3 groundstation_serial.py --port COM5
+```
+
+O firmware integrado usa 115200 baud por omissão. Para uma ligação APC220,
+usa a porta do adaptador USB-serial e configura o baud rate dos dois rádios
+(normalmente 9600):
 
 ```bash
 python3 groundstation_serial.py --port /dev/ttyUSB0 --baudrate 9600
 ```
 
-Substitui a porta e o baudrate pelos valores do teu adaptador e dos módulos. No Windows, indica a porta COM, por exemplo `--port COM3`. O protocolo serial usa uma mensagem JSON por linha, terminada em newline (`\n`); a ligação entre os módulos tem de transportar telemetria e respostas ACK. Não inicies simultaneamente a variante UDP e a serial, pois ambas usam as mesmas portas Web e WebSocket.
+O protocolo serial usa uma mensagem JSON por linha, terminada em newline
+(`\n`); a ligação tem de transportar telemetria e respostas ACK. Não inicies
+simultaneamente a variante UDP e a serial, pois ambas usam as mesmas portas
+Web e WebSocket.
 
 ## Captura, dados e encerramento
 

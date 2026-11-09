@@ -1,6 +1,6 @@
 /*
   CanSat sensor integration for ESP32-C6 Dev Module.
-  USB serial outputs five CANSAT-TLM v1 JSON packets per second.
+  USB serial outputs three CANSAT-TLM v1 JSON packets per second.
 */
 
 #include <Wire.h>
@@ -13,6 +13,9 @@
 #include "DFRobot_MultiGasSensor.h"
 #include <ArduinoJson.h>
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 constexpr uint8_t CANSAT_ID = 1;
 constexpr uint8_t SDA_PIN = 6;
@@ -26,8 +29,9 @@ constexpr uint8_t BME_MISO = 20;
 constexpr uint8_t BME_CS = 21;
 
 constexpr uint8_t O2_I2C_ADDRESS = 0x74;
-constexpr uint32_t TELEMETRY_INTERVAL_MS = 200;
+constexpr uint32_t BME680_INTERVAL_MS = 200;
 constexpr uint32_t SGP30_INTERVAL_MS = 1000;
+constexpr uint32_t TELEMETRY_INTERVAL_MS = 333;
 constexpr float UV_ZERO_MV = 6.0f;
 constexpr float UV_TEN_MV = 900.0f;
 constexpr uint16_t MIC_SAMPLE_COUNT = 500;
@@ -45,9 +49,10 @@ bool tslAvailable = false;
 bool magnetometerAvailable = false;
 bool oxygenAvailable = false;
 bool bmeReadingPending = false;
-float launchPressureHpa = 1013.25f;
+float seaLevelPressureHpa = 1013.25f;
 uint32_t sequenceNumber = 0;
 uint32_t previousSampleTime = 0;
+uint32_t previousBmeStartTime = 0;
 uint32_t previousSgp30Time = 0;
 uint32_t bmeReadingReadyAt = 0;
 uint32_t previousAltitudeTime = 0;
@@ -78,6 +83,8 @@ struct TelemetrySample {
 };
 
 TelemetrySample latestTelemetrySample;
+char serialCommandBuffer[256];
+size_t serialCommandLength = 0;
 
 uint32_t crc32(const char *text) {
   uint32_t crc = 0xFFFFFFFFUL;
@@ -102,6 +109,129 @@ float roundToTwoDecimals(float value) {
   return roundf(value * 100.0f) / 100.0f;
 }
 
+bool isSafeCommand(const char *command) {
+  constexpr char prefix[] = "set_p0:";
+  if (strncmp(command, prefix, sizeof(prefix) - 1) != 0) {
+    return false;
+  }
+  if (command[sizeof(prefix) - 1] == '\0') {
+    return false;
+  }
+  for (const char *character = command + sizeof(prefix) - 1;
+       *character != '\0'; ++character) {
+    if (!((*character >= '0' && *character <= '9') || *character == '.' ||
+          *character == '-' || *character == '+')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool verifySerialCommand(JsonDocument &message, int cansatId,
+                         const char *command) {
+  if (!isSafeCommand(command)) {
+    return false;
+  }
+
+  char canonical[256];
+  const int length = snprintf(canonical, sizeof(canonical),
+                              "{\"cansat_id\":%d,\"command\":\"%s\","
+                              "\"type\":\"command\"}",
+                              cansatId, command);
+  if (length <= 0 || static_cast<size_t>(length) >= sizeof(canonical)) {
+    return false;
+  }
+
+  const char *crcText = message["crc"] | "";
+  if (*crcText == '\0' || strlen(crcText) > 8) {
+    return false;
+  }
+  char *end = nullptr;
+  const unsigned long receivedCrc = strtoul(crcText, &end, 16);
+  return end != crcText && *end == '\0' &&
+         receivedCrc == static_cast<unsigned long>(crc32(canonical));
+}
+
+void sendCommandAck(int cansatId, const char *command, const char *status) {
+  char canonical[320];
+  const int length = snprintf(
+      canonical, sizeof(canonical),
+      "{\"cansat_id\":%d,\"command\":\"%s\",\"status\":\"%s\","
+      "\"type\":\"command_ack\"}",
+      cansatId, command, status);
+  if (length <= 0 || static_cast<size_t>(length) >= sizeof(canonical)) {
+    return;
+  }
+
+  StaticJsonDocument<384> response;
+  response["type"] = "command_ack";
+  response["cansat_id"] = cansatId;
+  response["command"] = command;
+  response["status"] = status;
+  char crcText[9];
+  snprintf(crcText, sizeof(crcText), "%08lX",
+           static_cast<unsigned long>(crc32(canonical)));
+  response["crc"] = crcText;
+  serializeJson(response, Serial);
+  Serial.println();
+}
+
+void processSerialCommand(const char *line) {
+  StaticJsonDocument<384> message;
+  const DeserializationError error = deserializeJson(message, line);
+  if (error || message["type"] != "command" ||
+      !message["cansat_id"].is<int>() ||
+      !message["command"].is<const char *>()) {
+    return;
+  }
+
+  const int cansatId = message["cansat_id"].as<int>();
+  const char *command = message["command"].as<const char *>();
+  if (cansatId != CANSAT_ID ||
+      !verifySerialCommand(message, cansatId, command)) {
+    return;
+  }
+
+  constexpr char prefix[] = "set_p0:";
+  char *end = nullptr;
+  const float requestedPressure =
+      strtof(command + sizeof(prefix) - 1, &end);
+  if (end == command + sizeof(prefix) - 1 || *end != '\0' ||
+      !isfinite(requestedPressure) || requestedPressure < 100.0f ||
+      requestedPressure > 1200.0f) {
+    sendCommandAck(cansatId, command, "rejected");
+    return;
+  }
+
+  seaLevelPressureHpa = requestedPressure;
+  latestTelemetrySample.altitude =
+      isfinite(latestTelemetrySample.pressure)
+          ? bme.readAltitude(seaLevelPressureHpa)
+          : NAN;
+  latestTelemetrySample.velocity = NAN;
+  latestTelemetrySample.acceleration = NAN;
+  previousAltitudeValid = false;
+  previousVelocityValid = false;
+  sendCommandAck(cansatId, command, "applied");
+}
+
+void readSerialCommands() {
+  while (Serial.available() > 0) {
+    const char character = static_cast<char>(Serial.read());
+    if (character == '\n') {
+      serialCommandBuffer[serialCommandLength] = '\0';
+      processSerialCommand(serialCommandBuffer);
+      serialCommandLength = 0;
+    } else if (character != '\r') {
+      if (serialCommandLength + 1 < sizeof(serialCommandBuffer)) {
+        serialCommandBuffer[serialCommandLength++] = character;
+      } else {
+        serialCommandLength = 0;
+      }
+    }
+  }
+}
+
 void initializeSensors() {
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setClock(100000);
@@ -115,7 +245,12 @@ void initializeSensors() {
     bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
     bme.setGasHeater(320, 150);
     if (bme.performReading() && bme.pressure > 0.0f) {
-      launchPressureHpa = bme.pressure / 100.0f;
+      latestTelemetrySample.pressure = bme.pressure / 100.0f;
+      latestTelemetrySample.temperature = bme.temperature;
+      latestTelemetrySample.humidity = roundToTwoDecimals(bme.humidity);
+      latestTelemetrySample.gasResistanceKohm = bme.gas_resistance / 1000.0f;
+      latestTelemetrySample.altitude =
+          bme.readAltitude(seaLevelPressureHpa);
     } else {
       bmeAvailable = false;
     }
@@ -145,7 +280,7 @@ void initializeSensors() {
   analogSetPinAttenuation(MIC_PIN, ADC_11db);
 }
 
-void readBme680(TelemetrySample &sample, uint32_t now) {
+void updateBme680(TelemetrySample &sample, uint32_t now) {
   if (!bmeAvailable) {
     return;
   }
@@ -156,7 +291,7 @@ void readBme680(TelemetrySample &sample, uint32_t now) {
       sample.temperature = bme.temperature;
       sample.humidity = roundToTwoDecimals(bme.humidity);
       sample.pressure = bme.pressure / 100.0f;
-      sample.altitude = bme.readAltitude(launchPressureHpa);
+      sample.altitude = bme.readAltitude(seaLevelPressureHpa);
       sample.gasResistanceKohm = bme.gas_resistance / 1000.0f;
 
       if (previousAltitudeValid) {
@@ -180,9 +315,11 @@ void readBme680(TelemetrySample &sample, uint32_t now) {
     bmeReadingPending = false;
   }
 
-  if (!bmeReadingPending) {
+  if (!bmeReadingPending &&
+      now - previousBmeStartTime >= BME680_INTERVAL_MS) {
     bmeReadingReadyAt = bme.beginReading();
     bmeReadingPending = bmeReadingReadyAt != 0;
+    previousBmeStartTime = now;
   }
 }
 
@@ -311,6 +448,7 @@ void sendTelemetry(const TelemetrySample &sample, uint32_t now) {
   data["parachute"] = nullptr;
   setNullable(data, "pitch", NAN);
   setNullable(data, "pressure", sample.pressure);
+  data["sea_level_pressure_hpa"] = seaLevelPressureHpa;
   setNullable(data, "roll", NAN);
   data["sensor_status"] = sensorStatus();
   setNullable(data, "sound_level_dbfs", sample.soundLevelDbfs);
@@ -348,29 +486,26 @@ void setup() {
   Serial.begin(115200);
   initializeSensors();
   previousSampleTime = millis() - TELEMETRY_INTERVAL_MS;
+  previousBmeStartTime = millis() - BME680_INTERVAL_MS;
   previousSgp30Time = millis() - SGP30_INTERVAL_MS;
 }
 
 void loop() {
-  while (Serial.available() > 0) {
-    Serial.read();
-  }
-
+  readSerialCommands();
   const uint32_t now = millis();
+  updateBme680(latestTelemetrySample, now);
+  readSgp30(latestTelemetrySample, now);
+
   if (now - previousSampleTime < TELEMETRY_INTERVAL_MS) {
     delay(1);
     return;
   }
   previousSampleTime = now;
 
-  TelemetrySample sample = latestTelemetrySample;
-  readBme680(sample, now);
-  readSgp30(sample, now);
-  readTsl2561(sample);
-  readMagnetometer(sample);
-  readUv(sample);
-  readOxygen(sample);
-  readMicrophone(sample);
-  latestTelemetrySample = sample;
-  sendTelemetry(sample, now);
+  readTsl2561(latestTelemetrySample);
+  readMagnetometer(latestTelemetrySample);
+  readUv(latestTelemetrySample);
+  readOxygen(latestTelemetrySample);
+  readMicrophone(latestTelemetrySample);
+  sendTelemetry(latestTelemetrySample, now);
 }

@@ -1,10 +1,10 @@
 # Firmware integrado dos sensores
 
-`CanSat.ino` foi preparado para a placa **ESP32-C6 Dev Module** e envia até
-cinco linhas JSON CANSAT-TLM v1 por segundo pela porta USB serial a 115200
-baud. A cadência pretendida é uma linha a cada 200 ms. O BME680 é lido de
-forma assíncrona para não bloquear o ciclo; o SGP30 atualiza eCO₂/TVOC a 1 Hz,
-mantendo o último valor nas linhas entre atualizações. A linha pode ser
+`CanSat.ino` foi preparado para a placa **ESP32-C6 Dev Module** e envia três
+linhas JSON CANSAT-TLM v1 por segundo pela porta USB serial a 115200 baud
+(uma a cada 333 ms). O BME680 é lido de forma assíncrona a cada 200 ms e o
+SGP30 atualiza eCO₂/TVOC a cada 1000 ms; cada pacote transmite o último valor
+guardado para cada sensor, sem tentar forçar leituras em cada transmissão. A linha pode ser
 recebida pela variante serial da GS. Nesta fase a câmara
 HuskyLens fica intencionalmente adiada, e a ligação APC220 fica por definir.
 
@@ -45,10 +45,10 @@ sensores I2C partilham o mesmo barramento configurado a 100 kHz.
 
 ## Dados e limitações nesta fase
 
-- `altitude` é relativa à pressão medida no arranque; `velocity` e
-  `acceleration` são derivadas de amostras de altitude barométrica. A
-  telemetria é transmitida até 5 Hz; alguns sensores atualizam a uma frequência
-  inferior e o pacote repete o último valor disponível.
+- `altitude` é calculada a partir da pressão e de `sea_level_pressure_hpa`
+  (P0); `velocity` e `acceleration` são derivadas de amostras de altitude
+  barométrica. O valor P0 predefinido é 1013,25 hPa. Uma alteração feita pela
+  GS fica ativa até reiniciar o ESP32.
 - `oxygen_percent` representa a concentração reportada pelo SEN0465 em
   percentagem de volume; humidade e oxigénio são transmitidos arredondados a
   duas casas decimais. `gas_resistance_kohm` é a resistência do sensor de gás
@@ -74,7 +74,7 @@ sensores I2C partilham o mesmo barramento configurado a 100 kHz.
 2. Descobre a porta COM da placa e inicia a GS serial, por exemplo:
 
    ```powershell
-   py -3 groundstation_serial.py --port COM5 --baudrate 115200
+   py -3 groundstation_serial.py --port COM5
    ```
 
 3. Abre o painel em <http://127.0.0.1:8050>. O botão **Sensores** abre um
@@ -82,7 +82,13 @@ sensores I2C partilham o mesmo barramento configurado a 100 kHz.
    humidade são apresentados com duas casas decimais; o painel UV usa a escala
    0–10. O nível do microfone em dBFS é relativo e não é dB SPL calibrado.
    A HuskyLens aparece como não integrada nesta versão.
+4. No painel **Referência de pressão para altitude**, introduz P0 em hPa e
+   clica **Aplicar P0**. Com um CanSat selecionado, o comando vai para esse
+   ID; sem seleção, vai para o último CanSat que transmitiu. A GS apresenta a
+   confirmação do ESP32 e a telemetria passa a incluir
+   `sea_level_pressure_hpa`. O comando requer a ligação USB serial
+   bidirecional; o APC220 ainda não está integrado neste firmware.
 
-O sketch drena as respostas seriais da GS, mas ainda não implementa
-retransmissão por ACK. Antes de usar o APC220, definir e validar os GPIO de
-UART, baud rate e estratégia de ACK/retransmissão para o rádio.
+O sketch ignora ACKs recebidos da GS, mas não implementa retransmissão por
+ACK. Antes de usar o APC220, definir e validar os GPIO de UART, baud rate e
+estratégia de ACK/retransmissão para o rádio.
