@@ -448,8 +448,8 @@ void sendTelemetry(const TelemetrySample &sample, uint32_t now) {
   data["parachute"] = nullptr;
   setNullable(data, "pitch", NAN);
   setNullable(data, "pressure", sample.pressure);
-  data["sea_level_pressure_hpa"] = seaLevelPressureHpa;
   setNullable(data, "roll", NAN);
+  data["sea_level_pressure_hpa"] = seaLevelPressureHpa;
   data["sensor_status"] = sensorStatus();
   setNullable(data, "sound_level_dbfs", sample.soundLevelDbfs);
   setNullable(data, "sound_rms_adc", sample.soundRmsAdc);
