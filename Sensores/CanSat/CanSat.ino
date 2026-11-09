@@ -92,6 +92,10 @@ void setNullable(JsonObject object, const char *key, float value) {
   }
 }
 
+float roundToTwoDecimals(float value) {
+  return roundf(value * 100.0f) / 100.0f;
+}
+
 void initializeSensors() {
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setClock(100000);
@@ -141,7 +145,7 @@ void readBme680(TelemetrySample &sample, uint32_t now) {
   }
 
   sample.temperature = bme.temperature;
-  sample.humidity = bme.humidity;
+  sample.humidity = roundToTwoDecimals(bme.humidity);
   sample.pressure = bme.pressure / 100.0f;
   sample.altitude = bme.readAltitude(launchPressureHpa);
   sample.gasResistanceKohm = bme.gas_resistance / 1000.0f;
@@ -210,12 +214,13 @@ void readUv(TelemetrySample &sample) {
   const float voltageMv = millivoltsSum / static_cast<float>(samples);
   const float uv = (voltageMv - UV_ZERO_MV) * 10.0f /
                    (UV_TEN_MV - UV_ZERO_MV);
-  sample.uvIndex = constrain(uv, 0.0f, 10.0f);
+  sample.uvIndex = roundToTwoDecimals(constrain(uv, 0.0f, 10.0f));
 }
 
 void readOxygen(TelemetrySample &sample) {
   if (oxygenAvailable && oxygenSensor.dataIsAvailable()) {
-    sample.oxygenPercent = AllDataAnalysis.gasconcentration;
+    sample.oxygenPercent =
+        roundToTwoDecimals(AllDataAnalysis.gasconcentration);
   }
 }
 

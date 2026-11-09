@@ -82,8 +82,10 @@ resultado é transmitido como hexadecimal. O ficheiro
 O firmware integrado atual está em [Sensores/CanSat/CanSat.ino](Sensores/CanSat/CanSat.ino).
 Instruções de bibliotecas, pinos e teste por USB estão em
 [Sensores/CanSat/README.md](Sensores/CanSat/README.md). Os emissores antigos
-continuam aceites; a HuskyLens, gráficos científicos e ligação APC220 do novo
-firmware ficam para etapas posteriores.
+continuam aceites; os gráficos de O2 e som já estão disponíveis na GS. A
+GS também inclui um widget **Sensores** com o estado e as respetivas
+medições; a HuskyLens e a ligação APC220 do novo firmware ficam para etapas
+posteriores.
 
 ## Estrutura
 

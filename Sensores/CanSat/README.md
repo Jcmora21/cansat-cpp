@@ -45,10 +45,12 @@ sensores I2C partilham o mesmo barramento configurado a 100 kHz.
 - `altitude` é relativa à pressão medida no arranque; `velocity` e
   `acceleration` são derivadas de amostras de altitude barométrica.
 - `oxygen_percent` representa a concentração reportada pelo SEN0465 em
-  percentagem de volume. `gas_resistance_kohm` é a resistência do sensor de
-  gás do BME680; não é uma medição de O2.
+  percentagem de volume; humidade e oxigénio são transmitidos arredondados a
+  duas casas decimais. `gas_resistance_kohm` é a resistência do sensor de gás
+  do BME680; não é uma medição de O2.
 - O índice UV usa provisoriamente os pontos indicados no sketch do CanSat:
-  6 mV = índice 0 e 900 mV = índice 10. É uma estimativa, a validar contra
+  6 mV = índice 0 e 900 mV = índice 10; o valor enviado é limitado à escala
+  0–10 e arredondado a duas casas decimais. É uma estimativa, a validar contra
   uma referência UV; os sketches anteriores tinham fórmulas discordantes.
 - `sound_level_dbfs` é relativo à escala ADC e não é dB SPL calibrado.
 - O HMC5883L produz magnetómetro/rumo magnético; não substitui um IMU. Os
@@ -70,8 +72,11 @@ sensores I2C partilham o mesmo barramento configurado a 100 kHz.
    py -3 groundstation_serial.py --port COM5 --baudrate 115200
    ```
 
-3. Abre o painel em <http://127.0.0.1:8050>. O CSV da sessão deve incluir os
-   novos campos; ainda não há gráficos específicos para O2, som ou magnetómetro.
+3. Abre o painel em <http://127.0.0.1:8050>. O botão **Sensores** abre um
+   widget com os sensores, as medições, unidades e estado visual. O2 e
+   humidade são apresentados com duas casas decimais; o painel UV usa a escala
+   0–10. O nível do microfone em dBFS é relativo e não é dB SPL calibrado.
+   A HuskyLens aparece como não integrada nesta versão.
 
 O sketch drena as respostas seriais da GS, mas ainda não implementa
 retransmissão por ACK. Antes de usar o APC220, definir e validar os GPIO de

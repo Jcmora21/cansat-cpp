@@ -125,6 +125,27 @@
         .hab-item-val { font-size: 1.05em; font-weight: 700; color: #38bdf8; font-variant-numeric: tabular-nums; }
         .hab-item-ref { font-size: 0.72em; color: #64748b; margin-top: 3px; line-height: 1.3; }
         .hab-note { font-size: 0.75em; color: #64748b; margin-top: 10px; line-height: 1.4; }
+        .btn-sensors { background: #2563eb; color: white; }
+        .btn-sensors.open { background: #1d4ed8; }
+        .sensor-panel { display: none; background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+        .sensor-panel.open { display: block; }
+        .sensor-panel-head { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+        .sensor-legend { color: #94a3b8; font-size: 0.78em; }
+        .sensor-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+        .sensor-item { background: #0f172a; border-radius: 6px; padding: 10px 12px; border-left: 4px solid #64748b; }
+        .sensor-item.green { border-left-color: #22c55e; }
+        .sensor-item.yellow { border-left-color: #eab308; }
+        .sensor-item.red { border-left-color: #ef4444; }
+        .sensor-item-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }
+        .sensor-name { font-size: 0.9em; font-weight: 700; color: #e2e8f0; }
+        .sensor-state { display: inline-flex; align-items: center; gap: 5px; color: #94a3b8; font-size: 0.72em; white-space: nowrap; }
+        .sensor-dot { width: 10px; height: 10px; border-radius: 50%; background: #64748b; flex-shrink: 0; }
+        .sensor-dot.green { background: #22c55e; box-shadow: 0 0 7px #22c55e88; }
+        .sensor-dot.yellow { background: #eab308; box-shadow: 0 0 7px #eab30888; }
+        .sensor-dot.red { background: #ef4444; box-shadow: 0 0 7px #ef444488; }
+        .sensor-reading { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; border-top: 1px solid #1e293b; font-size: 0.78em; }
+        .sensor-reading-name { color: #94a3b8; }
+        .sensor-reading-value { color: #38bdf8; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
     </style>
 </head>
 <body>
@@ -135,6 +156,7 @@
             <button class="btn btn-mode active" id="btnLive" onclick="setMode('live')">🔴 LIVE</button>
             <button class="btn btn-mode" id="btnReplay" onclick="setMode('replay')">▶️ REPLAY</button>
             <button class="btn btn-hab" id="btnHab" onclick="toggleHabPanel()">🌍 vs Terra</button>
+            <button class="btn btn-sensors" id="btnSensors" onclick="toggleSensorPanel()">🧪 Sensores</button>
             <button class="btn btn-export" onclick="downloadCSV()">📥 Exportar CSV</button>
             <button class="btn btn-img" onclick="downloadChartsAsImages()">📸 Baixar Gráficos (PNG)</button>
             <button class="btn btn-cancel" id="btnCapture" onclick="toggleCapture()">⏸️ Pausar captura</button>
@@ -238,6 +260,14 @@
             Referências aproximadas de superfície terrestre / zona compatível com água líquida e baixa hostilidade.
             Não é um veredito científico — é uma nota de missão para comparar voos e ler os dados depressa.
         </div>
+    </div>
+
+    <div id="sensorPanel" class="sensor-panel">
+        <div class="sensor-panel-head">
+            <div class="widget-title" style="margin:0">Estado dos sensores e últimas medições</div>
+            <div class="sensor-legend">Verde = leituras disponíveis · Amarelo = parcial / não integrado · Vermelho = sem leitura ou não detetado</div>
+        </div>
+        <div class="sensor-grid" id="sensorGrid"></div>
     </div>
 
     <!-- ========== FASE 4: Barra de Replay ========== -->
@@ -371,8 +401,11 @@
             { id: 'chartCO2', key: 'eco2', label: 'eCO2 (ppm)', color: '#34d399' },
             { id: 'chartTemp', key: 'temperatura', label: 'Temperatura (°C)', color: '#ec4899' },
             { id: 'chartPress', key: 'pressao', label: 'Pressão (hPa)', color: '#8b5cf6' },
-            { id: 'chartHum', key: 'humidade', label: 'Humidade (%)', color: '#06b6d4' },
-            { id: 'chartUV', key: 'uv', label: 'Índice UV', color: '#eab308' }
+            { id: 'chartHum', key: 'humidade', label: 'Humidade (%)', color: '#06b6d4', decimals: 2 },
+            { id: 'chartUV', key: 'uv', label: 'Índice UV (0–10)', color: '#eab308', decimals: 2, yMin: 0, yMax: 10 },
+            { id: 'chartOxygen', key: 'oxygen_percent', label: 'Oxigénio (%)', color: '#2dd4bf', decimals: 2 },
+            { id: 'chartSoundRms', key: 'sound_rms_adc', label: 'Som RMS (contagens ADC)', color: '#fb923c' },
+            { id: 'chartSoundDbfs', key: 'sound_level_dbfs', label: 'Som relativo (dBFS, não calibrado)', color: '#c084fc' }
         ];
 
         // Construir HTML dos Cartões dos Gráficos com Indicadores: Mín, Máx, Méd
@@ -393,7 +426,7 @@
             `;
         });
 
-        function makeChart(id, label, color) {
+        function makeChart(id, label, color, yMin, yMax) {
             const ctx = document.getElementById(id).getContext('2d');
             return new Chart(ctx, {
                 type: 'line',
@@ -421,6 +454,8 @@
                             }
                         }, 
                         y: { 
+                            min: yMin,
+                            max: yMax,
                             grid: { color: '#334155' },
                             ticks: { color: '#94a3b8' } 
                         } 
@@ -517,7 +552,7 @@
         
         const charts = {};
         chartConfigs.forEach(cfg => {
-            charts[cfg.id] = makeChart(cfg.id, cfg.label, cfg.color);
+            charts[cfg.id] = makeChart(cfg.id, cfg.label, cfg.color, cfg.yMin, cfg.yMax);
         });
 
         function updateKPIs(cfgId, dataArray) {
@@ -528,9 +563,13 @@
             const max = Math.max(...validData);
             const avg = validData.reduce((a, b) => a + b, 0) / validData.length;
 
-            document.getElementById(`min-${cfgId}`).innerText = Number.isInteger(min) ? min : min.toFixed(1);
-            document.getElementById(`max-${cfgId}`).innerText = Number.isInteger(max) ? max : max.toFixed(1);
-            document.getElementById(`avg-${cfgId}`).innerText = avg.toFixed(1);
+            const decimals = chartConfigs.find(cfg => cfg.id === cfgId)?.decimals;
+            const format = value => decimals !== undefined
+                ? formatTelemetryValue(value, '', decimals)
+                : Number.isInteger(value) ? String(value) : value.toFixed(1);
+            document.getElementById(`min-${cfgId}`).innerText = format(min);
+            document.getElementById(`max-${cfgId}`).innerText = format(max);
+            document.getElementById(`avg-${cfgId}`).innerText = format(avg);
         }
 
         function addPhaseLine(label, timeLabel, numericTime) {
@@ -593,7 +632,7 @@
                 }
             },
             {
-                key: 'humidade', name: 'Humidade', unit: '%', weight: 0.8,
+                key: 'humidade', name: 'Humidade', unit: '%', decimals: 2, weight: 0.8,
                 ref: 'Terra útil: ~20–80 % RH',
                 score(v) {
                     if (v >= 20 && v <= 80) return 'green';
@@ -637,12 +676,24 @@
                     if ((v >= 50 && v < 1000) || (v > 120000 && v <= 200000)) return 'yellow';
                     return 'red';
                 }
+            },
+            {
+                key: 'oxygen_percent', name: 'Oxigénio (informativo)', unit: '%', decimals: 2, informational: true,
+                ref: 'Referência aproximada do ar terrestre: 20,9% em volume. Não entra na nota: O₂ isolado não determina habitabilidade.'
             }
         ];
 
         function toggleHabPanel() {
             const panel = document.getElementById('habPanel');
             const btn = document.getElementById('btnHab');
+            const open = !panel.classList.contains('open');
+            panel.classList.toggle('open', open);
+            btn.classList.toggle('open', open);
+        }
+
+        function toggleSensorPanel() {
+            const panel = document.getElementById('sensorPanel');
+            const btn = document.getElementById('btnSensors');
             const open = !panel.classList.contains('open');
             panel.classList.toggle('open', open);
             btn.classList.toggle('open', open);
@@ -671,11 +722,18 @@
                 let valText = '—';
 
                 if (!isNaN(v)) {
-                    level = p.score(v);
-                    valText = (Number.isInteger(v) ? v : v.toFixed(1)) + (p.unit ? ' ' + p.unit : '');
-                    const pts = level === 'green' ? 2 : (level === 'yellow' ? 1 : 0);
-                    weightedPts += pts * p.weight;
-                    weightedMax += 2 * p.weight;
+                    if (!p.informational) {
+                        level = p.score(v);
+                    }
+                    valText = (p.decimals !== undefined
+                        ? formatTelemetryValue(v, '', p.decimals)
+                        : Number.isInteger(v) ? String(v) : v.toFixed(1)) +
+                        (p.unit ? ' ' + p.unit : '');
+                    if (!p.informational) {
+                        const pts = level === 'green' ? 2 : (level === 'yellow' ? 1 : 0);
+                        weightedPts += pts * p.weight;
+                        weightedMax += 2 * p.weight;
+                    }
                 }
 
                 const cls = level || '';
@@ -1077,6 +1135,131 @@ let selectedCansat = null;
 let viewMode = 'general';
 
 const cansatOfflinePeriods = {};
+
+function formatTelemetryValue(value, unit = '', decimals) {
+    if (value === undefined) return undefined;
+    if (value === null) return 'Indisponível';
+    if (decimals !== undefined && Number.isFinite(Number(value))) {
+        const factor = 10 ** decimals;
+        value = (Math.round((Number(value) + Number.EPSILON) * factor) / factor)
+            .toFixed(decimals);
+    }
+    return unit ? `${value} ${unit}` : String(value);
+}
+
+const SENSOR_WIDGETS = [
+    {
+        name: 'BME680',
+        statusKey: 'bme680',
+        readings: [
+            { key: 'temperatura', label: 'Temperatura', unit: '°C' },
+            { key: 'humidade', label: 'Humidade', unit: '%', decimals: 2 },
+            { key: 'pressao', label: 'Pressão', unit: 'hPa' },
+            { key: 'gas_resistance_kohm', label: 'Resistência do gás', unit: 'kΩ' }
+        ]
+    },
+    {
+        name: 'SGP30',
+        statusKey: 'sgp30',
+        readings: [
+            { key: 'eco2', label: 'eCO₂ equivalente', unit: 'ppm' },
+            { key: 'tvoc', label: 'TVOC', unit: 'ppb' }
+        ]
+    },
+    {
+        name: 'TSL2561',
+        statusKey: 'tsl2561',
+        readings: [{ key: 'lux', label: 'Intensidade luminosa', unit: 'lx' }]
+    },
+    {
+        name: 'HMC5883L',
+        statusKey: 'hmc5883l',
+        readings: [
+            { key: 'mag_x', label: 'Campo magnético X', unit: 'µT' },
+            { key: 'mag_y', label: 'Campo magnético Y', unit: 'µT' },
+            { key: 'mag_z', label: 'Campo magnético Z', unit: 'µT' },
+            { key: 'heading', label: 'Rumo magnético', unit: '°' }
+        ]
+    },
+    {
+        name: 'GUVA-S12SD',
+        statusKey: 'uv',
+        readings: [{ key: 'uv', label: 'Índice UV (0–10)', unit: '', decimals: 2 }]
+    },
+    {
+        name: 'MAX4466',
+        statusKey: 'max4466',
+        readings: [
+            { key: 'sound_rms_adc', label: 'Som RMS', unit: 'contagens ADC' },
+            { key: 'sound_level_dbfs', label: 'Nível relativo (não calibrado)', unit: 'dBFS' }
+        ]
+    },
+    {
+        name: 'Gravity SEN0465',
+        statusKey: 'sen0465',
+        readings: [{ key: 'oxygen_percent', label: 'Oxigénio', unit: '%', decimals: 2 }]
+    },
+    {
+        name: 'HuskyLens',
+        integrated: false,
+        readings: [{ label: 'Câmara / deteção IA', value: 'Não integrada nesta versão' }]
+    }
+];
+
+function updateSensorWidget(data = {}) {
+    const grid = document.getElementById('sensorGrid');
+    if (!grid) return;
+
+    const reportedStates = {};
+    if (typeof data.sensor_status === 'string') {
+        data.sensor_status.split(';').forEach(entry => {
+            const [key, value] = entry.split('=');
+            if (key && value) reportedStates[key.trim()] = value.trim().toLowerCase();
+        });
+    }
+
+    grid.innerHTML = SENSOR_WIDGETS.map(sensor => {
+        const validReadings = sensor.readings.filter(reading =>
+            reading.key && Number.isFinite(Number(data[reading.key])) &&
+            data[reading.key] !== null && data[reading.key] !== ''
+        ).length;
+        const reported = sensor.statusKey ? reportedStates[sensor.statusKey] : undefined;
+        let level = 'green';
+        let state = 'Leitura OK';
+
+        if (sensor.integrated === false) {
+            level = 'yellow';
+            state = 'Não integrado';
+        } else if (reported === 'missing') {
+            level = 'red';
+            state = 'Não detetado';
+        } else if (validReadings === 0) {
+            level = 'red';
+            state = 'Sem leitura';
+        } else if (validReadings < sensor.readings.length || reported === undefined) {
+            level = 'yellow';
+            state = 'Parcial / por confirmar';
+        }
+
+        const readingsHtml = sensor.readings.map(reading => {
+            const value = reading.key
+                ? formatTelemetryValue(data[reading.key], reading.unit, reading.decimals)
+                : reading.value;
+            return `<div class="sensor-reading">
+                <span class="sensor-reading-name">${reading.label}</span>
+                <span class="sensor-reading-value">${value ?? 'Indisponível'}</span>
+            </div>`;
+        }).join('');
+
+        return `<div class="sensor-item ${level}">
+            <div class="sensor-item-head">
+                <span class="sensor-name">${sensor.name}</span>
+                <span class="sensor-state"><span class="sensor-dot ${level}"></span>${state}</span>
+            </div>
+            ${readingsHtml}
+        </div>`;
+    }).join('');
+}
 
 const cansatColors = [
     "#38bdf8", // CanSat 1 — Azul
@@ -1548,34 +1731,51 @@ function selectCansat(id) {
             updateParachute(data);
             updateWind(data);
             updateHabitability(data);
+            updateSensorWidget(data);
 
             const fields = {
                 "Pacote ID": data.id,
-                "Tempo": data.tempo !== undefined ? data.tempo + " s" : undefined,
-                "Estado Voo": data.estado,
-                "Altitude": data.altitude !== undefined ? data.altitude + " m" : undefined,
-                "Velocidade": data.velocidade !== undefined ? data.velocidade + " m/s" : undefined,
-                "Força-G": data.forca_g !== undefined ? data.forca_g + " g" : undefined,
-                "Aceleração": data.aceleracao !== undefined ? data.aceleracao + " m/s²" : undefined,
-                "Temperatura": data.temperatura !== undefined ? data.temperatura + " °C" : undefined,
-                "Humidade": data.humidade !== undefined ? data.humidade + " %" : undefined,
-                "Pressão": data.pressao !== undefined ? data.pressao + " hPa" : undefined,
-                "eCO2": data.eco2 !== undefined ? data.eco2 + " ppm" : undefined,
-                "TVOC": data.tvoc !== undefined ? data.tvoc + " ppb" : undefined,
-                "Índice UV": data.uv,
-                "Luminosidade": data.lux !== undefined ? data.lux + " lx" : undefined,
-                "Paraquedas": data.paraquedas !== undefined ? (data.paraquedas ? "ABERTO" : "FECHADO") : undefined,
-                "Accel X": data.acc_x !== undefined ? data.acc_x + " g" : undefined,
-                "Accel Y": data.acc_y !== undefined ? data.acc_y + " g" : undefined,
-                "Accel Z": data.acc_z !== undefined ? data.acc_z + " g" : undefined,
-                "Gyro X": data.gyro_x !== undefined ? data.gyro_x + " °/s" : undefined,
-                "Gyro Y": data.gyro_y !== undefined ? data.gyro_y + " °/s" : undefined,
-                "Gyro Z": data.gyro_z !== undefined ? data.gyro_z + " °/s" : undefined,
-                "Pitch": data.pitch !== undefined ? data.pitch + "°" : undefined,
-                "Roll": data.roll !== undefined ? data.roll + "°" : undefined,
-                "Yaw": data.yaw !== undefined ? data.yaw + "°" : undefined,
-                "RSSI LoRa": data.rssi !== undefined ? data.rssi + " dBm" : undefined,
-                "SNR LoRa": data.snr !== undefined ? data.snr + " dB" : undefined
+                "Tempo": formatTelemetryValue(data.tempo, "s"),
+                "Estado Voo": formatTelemetryValue(data.estado),
+                "Altitude": formatTelemetryValue(data.altitude, "m"),
+                "Velocidade": formatTelemetryValue(data.velocidade, "m/s"),
+                "Força-G": formatTelemetryValue(data.forca_g, "g"),
+                "Aceleração": formatTelemetryValue(data.aceleracao, "m/s²"),
+                "Temperatura": formatTelemetryValue(data.temperatura, "°C"),
+                "Humidade": formatTelemetryValue(data.humidade, "%", 2),
+                "Pressão": formatTelemetryValue(data.pressao, "hPa"),
+                "eCO2": formatTelemetryValue(data.eco2, "ppm"),
+                "TVOC": formatTelemetryValue(data.tvoc, "ppb"),
+                "Índice UV": formatTelemetryValue(data.uv, '', 2),
+                "Luminosidade": formatTelemetryValue(data.lux, "lx"),
+                "Oxigénio": formatTelemetryValue(data.oxygen_percent, "%", 2),
+                "Som RMS": formatTelemetryValue(data.sound_rms_adc, "contagens ADC"),
+                "Som relativo": data.sound_level_dbfs === undefined
+                    ? undefined
+                    : data.sound_level_dbfs === null
+                        ? "Indisponível"
+                        : `${data.sound_level_dbfs} dBFS (não calibrado)`,
+                "Resistência do gás": formatTelemetryValue(data.gas_resistance_kohm, "kΩ"),
+                "Magnetómetro X": formatTelemetryValue(data.mag_x),
+                "Magnetómetro Y": formatTelemetryValue(data.mag_y),
+                "Magnetómetro Z": formatTelemetryValue(data.mag_z),
+                "Rumo magnético": formatTelemetryValue(data.heading, "°"),
+                "Paraquedas": data.paraquedas === undefined
+                    ? undefined
+                    : data.paraquedas === null
+                        ? "Indisponível"
+                        : data.paraquedas ? "ABERTO" : "FECHADO",
+                "Accel X": formatTelemetryValue(data.acc_x, "g"),
+                "Accel Y": formatTelemetryValue(data.acc_y, "g"),
+                "Accel Z": formatTelemetryValue(data.acc_z, "g"),
+                "Gyro X": formatTelemetryValue(data.gyro_x, "°/s"),
+                "Gyro Y": formatTelemetryValue(data.gyro_y, "°/s"),
+                "Gyro Z": formatTelemetryValue(data.gyro_z, "°/s"),
+                "Pitch": formatTelemetryValue(data.pitch, "°"),
+                "Roll": formatTelemetryValue(data.roll, "°"),
+                "Yaw": formatTelemetryValue(data.yaw, "°"),
+                "RSSI LoRa": formatTelemetryValue(data.rssi, "dBm"),
+                "SNR LoRa": formatTelemetryValue(data.snr, "dB")
             };
 
             let html = "";
@@ -1840,6 +2040,7 @@ function selectCansat(id) {
                 document.getElementById(`avg-${cfg.id}`).innerText = "-";
             });
             document.getElementById('metrics').innerHTML = "";
+            updateSensorWidget({});
         }
 
         function formatMMSS(sec) {
@@ -2276,6 +2477,7 @@ function selectCansat(id) {
             drawVSI(null);
             drawAttitude(0, 0);
             updateHabitability({});
+            updateSensorWidget({});
 
             if (ws.readyState === WebSocket.OPEN && currentMode === 'live') {
                 ws.send(JSON.stringify({ action: "clear" }));
@@ -2288,6 +2490,7 @@ function selectCansat(id) {
         drawVSI(null);
         drawAttitude(0, 0);
         updateHabitability({});
+        updateSensorWidget({});
     </script>
 </body>
 </html>
