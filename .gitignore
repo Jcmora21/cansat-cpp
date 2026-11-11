@@ -11,3 +11,4 @@ dados_voo/
 dados_voo/
 __pycache__/
 *.pyc
+Sensores/CanSat/CanSatSecrets.h

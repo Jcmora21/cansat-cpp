@@ -1,3 +1,4 @@
+import base64
 import time
 import asyncio
 import socket
@@ -12,6 +13,8 @@ import sys
 import zlib
 from collections import deque
 from datetime import datetime
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # Keep diagnostic output from terminating the Windows process on non-UTF-8 consoles.
 for output_stream in (sys.stdout, sys.stderr):
@@ -41,6 +44,17 @@ csv_logging_enabled = True
 discarded_while_paused = 0
 MAX_FLIGHT_HISTORY = 2000
 CSV_DELIMITER = ";"
+TELEMETRY_INTERVAL_MS = 200
+AES_KEY_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "Sensores",
+    "CanSat",
+    "CanSatSecrets.h",
+)
+aes_telemetry_key = None
+aes_key_checked = False
+aes_key_error_logged = False
+sea_level_pressure_by_cansat = {}
 
 csv_headers = [
     "id",
@@ -56,6 +70,7 @@ csv_headers = [
     "eco2",
     "tvoc",
     "uv",
+    "uv_millivolts",
     "lux",
     "paraquedas",
     "acc_x",
@@ -71,6 +86,9 @@ csv_headers = [
     "oxygen_percent",
     "sound_rms_adc",
     "sound_level_dbfs",
+    "sound_adc_sum",
+    "sound_adc_sum_squares",
+    "sound_sample_count",
     "mag_x",
     "mag_y",
     "mag_z",
@@ -83,12 +101,14 @@ csv_headers = [
 
 
 def init_csv(filename):
-    with open(filename, mode="w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f, delimiter=CSV_DELIMITER)
-        writer.writerow(csv_headers)
+    output_file = open(filename, mode="w", newline="", encoding="utf-8-sig")
+    writer = csv.writer(output_file, delimiter=CSV_DELIMITER)
+    writer.writerow(csv_headers)
+    output_file.flush()
+    return output_file, writer
 
 
-init_csv(csv_filename)
+csv_file, csv_writer = init_csv(csv_filename)
 print(f"💾 [Logger] Gravação automática de dados ativa em: {csv_filename}")
 
 
@@ -222,10 +242,19 @@ def validate_telemetry_packet(packet):
         "mag_z",
         "heading",
         "sea_level_pressure_hpa",
+        "sound_adc_sum",
+        "sound_adc_sum_squares",
+        "uv_millivolts",
     )
     for field in optional_numeric_data_fields:
         if field in data and data[field] is not None and not is_finite_number(data[field]):
             return False, [f"data.{field}"]
+    if "sound_sample_count" in data and data["sound_sample_count"] is not None:
+        if (
+            type(data["sound_sample_count"]) is not int
+            or not 0 <= data["sound_sample_count"] <= 500
+        ):
+            return False, ["data.sound_sample_count"]
     if "sensor_status" in data and not isinstance(data["sensor_status"], str):
         return False, ["data.sensor_status"]
 
@@ -248,6 +277,268 @@ def verify_packet_crc(packet):
     return crc_received.upper().zfill(8) == calculate_crc32(crc_payload)
 
 
+def load_telemetry_aes_key():
+    global aes_telemetry_key, aes_key_checked, aes_key_error_logged
+    if aes_key_checked:
+        return aes_telemetry_key
+
+    aes_key_checked = True
+    try:
+        with open(AES_KEY_PATH, encoding="ascii") as key_file:
+            contents = key_file.read()
+    except (OSError, UnicodeError) as error:
+        if not aes_key_error_logged:
+            print(
+                "[AES-GCM] Chave indisponivel. Cria CanSatSecrets.h "
+                f"e reinicia a GS ({error})."
+            )
+            aes_key_error_logged = True
+        return None
+
+    match = re.search(
+        r'^\s*#define\s+CANSAT_AES_KEY_HEX\s+"([0-9A-Fa-f]{64})"\s*$',
+        contents,
+        re.MULTILINE,
+    )
+    if match is None:
+        if not aes_key_error_logged:
+            print(
+                "[AES-GCM] Chave invalida em CanSatSecrets.h; "
+                "esperados exatamente 64 caracteres hexadecimais."
+            )
+            aes_key_error_logged = True
+        return None
+
+    aes_telemetry_key = bytes.fromhex(match.group(1))
+    return aes_telemetry_key
+
+
+def decrypt_encrypted_telemetry(envelope):
+    global aes_key_error_logged
+    if (
+        envelope.get("protocol") != "CANSAT-TLM-ENC"
+        or envelope.get("version") != 1
+        or envelope.get("type") != "encrypted_telemetry"
+        or type(envelope.get("cansat_id")) is not int
+        or envelope["cansat_id"] < 0
+    ):
+        return None
+
+    key = load_telemetry_aes_key()
+    if key is None:
+        return None
+
+    try:
+        nonce = base64.b64decode(envelope["nonce"], validate=True)
+        ciphertext = base64.b64decode(envelope["ciphertext"], validate=True)
+        tag = base64.b64decode(envelope["tag"], validate=True)
+        if len(nonce) != 12 or len(tag) != 16:
+            raise ValueError("nonce/tag AES-GCM com tamanho invalido")
+        additional_data = (
+            f"CANSAT-TLM-ENC|1|{envelope['cansat_id']}".encode("ascii")
+        )
+        plaintext = AESGCM(key).decrypt(
+            nonce, ciphertext + tag, additional_data
+        )
+        packet = json.loads(
+            plaintext.decode("utf-8"),
+            parse_constant=reject_nonstandard_json_constant,
+        )
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError,
+            json.JSONDecodeError, InvalidTag) as error:
+        if not aes_key_error_logged:
+            print(
+                "[AES-GCM] Pacote descartado: chave incorreta ou dados "
+                f"alterados ({error})."
+            )
+            aes_key_error_logged = True
+        return None
+
+    if (
+        not isinstance(packet, dict)
+        or packet.get("protocol") != "CANSAT-TLM"
+        or packet.get("cansat_id") != envelope["cansat_id"]
+    ):
+        if not aes_key_error_logged:
+            print("[AES-GCM] Pacote descartado: conteúdo desencriptado inválido.")
+            aes_key_error_logged = True
+        return None
+    return packet
+
+
+def set_cansat_sea_level_pressure(message):
+    cansat_id = message.get("cansat_id")
+    pressure = message.get("sea_level_pressure_hpa")
+    if (
+        type(cansat_id) is not int
+        or cansat_id < 0
+        or not is_finite_number(pressure)
+        or not 100.0 <= pressure <= 1200.0
+    ):
+        return {
+            "type": "p0_status",
+            "status": "error",
+            "reason": "invalid_p0",
+            "cansat_id": cansat_id,
+        }
+
+    with cansats_lock:
+        sea_level_pressure_by_cansat[cansat_id] = float(pressure)
+        cansat = get_cansat_state(cansat_id)
+        cansat["last_derived_time_ms"] = None
+        cansat["last_derived_altitude"] = None
+        cansat["last_derived_velocity"] = None
+    return {
+        "type": "p0_status",
+        "status": "applied",
+        "cansat_id": cansat_id,
+        "sea_level_pressure_hpa": float(pressure),
+    }
+
+
+def update_ground_station_calculations(parsed):
+    cansat_id = parsed.get("cansat_id")
+    raw_mission_time = parsed.get("mission_time_ms")
+    sequence = parsed.get("sequence")
+    if type(cansat_id) is not int or type(raw_mission_time) is not int:
+        return
+
+    with cansats_lock:
+        cansat = get_cansat_state(cansat_id)
+        previous_raw_time = cansat["last_raw_mission_time_ms"]
+        previous_sequence = cansat["last_sequence"]
+        rebooted = (
+            previous_raw_time is not None
+            and previous_sequence is not None
+            and type(sequence) is int
+            and sequence < previous_sequence
+            and raw_mission_time < previous_raw_time
+        )
+        out_of_order = (
+            previous_sequence is not None
+            and type(sequence) is int
+            and sequence <= previous_sequence
+            and not rebooted
+        )
+        if rebooted:
+            previous_normalized_time = (
+                cansat["last_normalized_mission_time_ms"]
+                if cansat["last_normalized_mission_time_ms"] is not None
+                else previous_raw_time
+            )
+            cansat["mission_time_offset_ms"] = (
+                previous_normalized_time + TELEMETRY_INTERVAL_MS
+                - raw_mission_time
+            )
+            cansat["last_sequence"] = None
+            cansat["seen_sequences"].clear()
+            cansat["seen_sequence_order"].clear()
+            cansat["lost_sequences"].clear()
+            cansat["lost_sequence_order"].clear()
+            cansat["incomplete_sequences"].clear()
+            cansat["incomplete_sequence_order"].clear()
+            cansat["last_derived_time_ms"] = None
+            cansat["last_derived_altitude"] = None
+            cansat["last_derived_velocity"] = None
+            print(f"[Receiver] CanSat {cansat_id} reiniciou; a retomar sequencia.")
+
+        normalized_time = (
+            raw_mission_time + cansat["mission_time_offset_ms"]
+        )
+        if rebooted or previous_raw_time is None or raw_mission_time >= previous_raw_time:
+            cansat["last_raw_mission_time_ms"] = raw_mission_time
+            cansat["last_normalized_mission_time_ms"] = normalized_time
+        reported_reference = parsed.get("sea_level_pressure_hpa")
+        pressure_reference = sea_level_pressure_by_cansat.get(
+            cansat_id,
+            reported_reference
+            if is_finite_number(reported_reference)
+            and 100.0 <= reported_reference <= 1200.0
+            else 1013.25,
+        )
+
+    parsed["mission_time_ms"] = normalized_time
+    parsed["tempo"] = f"{normalized_time / 1000.0:.3f}"
+    parsed["sea_level_pressure_hpa"] = pressure_reference
+    if out_of_order:
+        return
+
+    uv_millivolts = parsed.get("uv_millivolts")
+    if not is_finite_number(parsed.get("uv")) and is_finite_number(uv_millivolts):
+        parsed["uv"] = min(
+            10.0,
+            max(0.0, (uv_millivolts - 6.0) * 10.0 / (900.0 - 6.0)),
+        )
+
+    pressure = parsed.get("pressao")
+    if not is_finite_number(parsed.get("altitude")) and (
+        is_finite_number(pressure) and pressure > 0
+    ):
+        altitude = 44330.0 * (
+            1.0 - (pressure / pressure_reference) ** 0.190294957
+        )
+        parsed["altitude"] = altitude
+        parsed["velocidade"] = None
+        parsed["aceleracao"] = None
+
+        with cansats_lock:
+            cansat = get_cansat_state(cansat_id)
+            previous_time = cansat["last_derived_time_ms"]
+            previous_altitude = cansat["last_derived_altitude"]
+            previous_velocity = cansat["last_derived_velocity"]
+            if previous_time is not None and previous_altitude is not None:
+                delta_ms = normalized_time - previous_time
+                if 0 < delta_ms <= 2000:
+                    velocity = (altitude - previous_altitude) / (delta_ms / 1000.0)
+                    parsed["velocidade"] = velocity
+                    if previous_velocity is not None:
+                        parsed["aceleracao"] = (
+                            velocity - previous_velocity
+                        ) / (delta_ms / 1000.0)
+                    cansat["last_derived_velocity"] = velocity
+                else:
+                    cansat["last_derived_velocity"] = None
+            else:
+                cansat["last_derived_velocity"] = None
+            cansat["last_derived_time_ms"] = normalized_time
+            cansat["last_derived_altitude"] = altitude
+
+    magnetic_x = parsed.get("mag_x")
+    magnetic_y = parsed.get("mag_y")
+    if (
+        not is_finite_number(parsed.get("heading"))
+        and is_finite_number(magnetic_x)
+        and is_finite_number(magnetic_y)
+    ):
+        parsed["heading"] = math.degrees(math.atan2(magnetic_y, magnetic_x)) % 360.0
+
+    sound_sample_count = parsed.get("sound_sample_count")
+    sound_adc_sum = parsed.get("sound_adc_sum")
+    sound_adc_sum_squares = parsed.get("sound_adc_sum_squares")
+    if (
+        type(sound_sample_count) is int
+        and sound_sample_count > 0
+        and is_finite_number(sound_adc_sum)
+        and is_finite_number(sound_adc_sum_squares)
+    ):
+        sound_mean = sound_adc_sum / sound_sample_count
+        sound_variance = (
+            sound_adc_sum_squares / sound_sample_count - sound_mean * sound_mean
+        )
+        parsed["sound_rms_adc"] = math.sqrt(max(0.0, sound_variance))
+
+    sound_rms = parsed.get("sound_rms_adc")
+    if (
+        not is_finite_number(parsed.get("sound_level_dbfs"))
+        and is_finite_number(sound_rms)
+        and sound_rms > 0
+    ):
+        full_scale_sine_rms = 2047.5 / math.sqrt(2.0)
+        parsed["sound_level_dbfs"] = 20.0 * math.log10(
+            sound_rms / full_scale_sine_rms
+        )
+
+
 def new_cansat_state():
     return {
         "latest": None,
@@ -257,6 +548,12 @@ def new_cansat_state():
         "last_received": time.time(),
         "status": "ONLINE",
         "last_sequence": None,
+        "last_raw_mission_time_ms": None,
+        "last_normalized_mission_time_ms": None,
+        "mission_time_offset_ms": 0,
+        "last_derived_time_ms": None,
+        "last_derived_altitude": None,
+        "last_derived_velocity": None,
         "seen_sequences": set(),
         "seen_sequence_order": deque(),
         "lost_sequences": set(),
@@ -517,6 +814,19 @@ def transport_receiver(transport_factory=UDPTransport):
             print("Pacote ignorado: JSON nao e um objeto")
             continue
 
+        if packet.get("type") == "telemetry_error":
+            print(
+                f"[CanSat] Erro no firmware: "
+                f"{packet.get('error', 'erro desconhecido')}"
+            )
+            continue
+
+        is_encrypted_packet = packet.get("type") == "encrypted_telemetry"
+        if is_encrypted_packet:
+            packet = decrypt_encrypted_telemetry(packet)
+            if packet is None:
+                continue
+
         if packet.get("type") == "command_ack":
             if verify_packet_crc(packet):
                 emit_event({
@@ -540,7 +850,7 @@ def transport_receiver(transport_factory=UDPTransport):
                 print("Pacote CANSAT-TLM ignorado: versao ou tipo nao suportado.")
                 continue
 
-            if not verify_packet_crc(packet):
+            if not is_encrypted_packet and not verify_packet_crc(packet):
                 cansat_id = packet.get("cansat_id")
                 if type(cansat_id) is int and cansat_id >= 0:
                     with cansats_lock:
@@ -607,6 +917,7 @@ def transport_receiver(transport_factory=UDPTransport):
                 "eco2": data_block.get("eco2"),
                 "tvoc": data_block.get("tvoc"),
                 "uv": data_block.get("uv"),
+                "uv_millivolts": data_block.get("uv_millivolts"),
                 "lux": data_block.get("lux"),
                 "acc_x": data_block.get("acc_x"),
                 "acc_y": data_block.get("acc_y"),
@@ -622,6 +933,11 @@ def transport_receiver(transport_factory=UDPTransport):
                 "oxygen_percent": data_block.get("oxygen_percent"),
                 "sound_rms_adc": data_block.get("sound_rms_adc"),
                 "sound_level_dbfs": data_block.get("sound_level_dbfs"),
+                "sound_adc_sum": data_block.get("sound_adc_sum"),
+                "sound_adc_sum_squares": data_block.get(
+                    "sound_adc_sum_squares"
+                ),
+                "sound_sample_count": data_block.get("sound_sample_count"),
                 "mag_x": data_block.get("mag_x"),
                 "mag_y": data_block.get("mag_y"),
                 "mag_z": data_block.get("mag_z"),
@@ -635,6 +951,9 @@ def transport_receiver(transport_factory=UDPTransport):
             }
         else:
             parsed = packet
+
+        if is_protocol_packet:
+            update_ground_station_calculations(parsed)
 
         cansat_id = parsed.get("cansat_id")
         if cansat_id is not None and (type(cansat_id) is not int or cansat_id < 0):
@@ -671,7 +990,7 @@ def transport_receiver(transport_factory=UDPTransport):
 
             current_sequence = parsed.get("sequence")
             if type(current_sequence) is int and current_sequence >= 0:
-                if is_protocol_packet:
+                if is_protocol_packet and not is_encrypted_packet:
                     try:
                         send_ack(cansat_id, current_sequence, address)
                     except OSError as error:
@@ -717,8 +1036,8 @@ def transport_receiver(transport_factory=UDPTransport):
 
                 if csv_logging_enabled:
                     row = [parsed.get(header, "") for header in csv_headers]
-                    with open(csv_filename, mode="a", newline="", encoding="utf-8") as file:
-                        csv.writer(file, delimiter=CSV_DELIMITER).writerow(row)
+                    csv_writer.writerow(row)
+                    csv_file.flush()
 
                 if cansat_id is not None:
                     with cansats_lock:
@@ -833,6 +1152,9 @@ async def ws_handler(websocket):
                 with capture_state_lock:
                     capture_enabled = enabled
                 await broadcast(json.dumps(receiving_state_event()))
+            elif data.get("type") == "set_p0":
+                result = set_cansat_sea_level_pressure(data)
+                await websocket.send(json.dumps(result))
             elif data.get("type") == "command":
                 result = handle_command(data)
                 await websocket.send(json.dumps(result))

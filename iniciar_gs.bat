@@ -7,7 +7,7 @@ if defined VIRTUAL_ENV if exist "%VIRTUAL_ENV%\Scripts\python.exe" set "PYTHON_E
 if not defined PYTHON_EXE if exist "%~dp0.venv\Scripts\python.exe" set "PYTHON_EXE=%~dp0.venv\Scripts\python.exe"
 
 if defined PYTHON_EXE (
-    "%PYTHON_EXE%" -c "import websockets" >nul 2>nul
+    "%PYTHON_EXE%" -c "import websockets, cryptography" >nul 2>nul
 ) else (
     where py >nul 2>nul
     if errorlevel 1 (
@@ -15,14 +15,14 @@ if defined PYTHON_EXE (
         pause
         exit /b 1
     )
-    py -3 -c "import websockets" >nul 2>nul
+    py -3 -c "import websockets, cryptography" >nul 2>nul
 )
 if errorlevel 1 (
-    echo ERRO: falta a dependencia Python websockets.
+    echo ERRO: faltam dependencias Python da Ground Station.
     if defined PYTHON_EXE (
-        echo Instala-a com: "%PYTHON_EXE%" -m pip install websockets
+        echo Instala-as com: "%PYTHON_EXE%" -m pip install -r requirements.txt
     ) else (
-        echo Instala-a com: py -3 -m pip install websockets
+        echo Instala-as com: py -3 -m pip install -r requirements.txt
     )
     pause
     exit /b 1

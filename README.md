@@ -5,7 +5,7 @@ Este repositório contém uma Ground Station para telemetria de **um ou vários 
 ## Funcionalidades
 
 - Painel Web em tempo real com gráficos, estado de voo, indicadores e vista geral ou individual por CanSat.
-- Protocolo CANSAT-TLM v1, com validação dos campos e CRC32, ACKs, identificação de pacotes duplicados/perdidos e estado de ligação.
+- Protocolo CANSAT-TLM v1, CRC32 para emissores simples e AES-GCM no firmware novo, com validação e estado de ligação.
 - Compatibilidade com um CanSat ou vários. O simulador incluído gera cinco CanSats; a GS não exige que todos estejam ativos.
 - Gravação automática em CSV, incluindo `cansat_id`, em `dados_voo/`; termina 30 segundos depois de todos os CanSats detetados reportarem aterragem (`SOLO` e altitude até 0,1 m).
 - Os CSV usam `;` como separador e codificação UTF-8 com BOM para abrir as colunas corretamente no Excel com configuração regional portuguesa. A telemetria enviada pelo CanSat continua no protocolo JSON CANSAT-TLM.
@@ -22,12 +22,14 @@ o pacote que o CanSat (ou o simulador) envia, antes de a GS converter os nomes
 para uso interno no painel e no CSV. Os campos listados são os nomes exatos
 esperados no protocolo.
 
-Todos os campos de topo são obrigatórios. Dentro de `data`, todos os campos
+Todos os campos de topo indicados, exceto `crc` nos pacotes cifrados, são
+obrigatórios. Dentro de `data`, todos os campos
 base indicados são obrigatórios, mas uma medição pode ser `null` se o sensor
 não existir ou não tiver produzido uma leitura válida. Em `link`, `rssi` e
 `snr` são obrigatórios e podem ser `null` quando o rádio não fornece essas
-métricas; `packet_loss` é opcional. O campo `crc` também é necessário para a
-GS aceitar o pacote. Campos científicos adicionais em `data` são opcionais;
+métricas; `packet_loss` é opcional. Pacotes simples usam o campo `crc`;
+no firmware novo, AES-GCM autentica o envelope cifrado. Campos científicos
+adicionais em `data` são opcionais;
 os atuais incluem O₂, som, resistência do gás e magnetómetro.
 
 | Campo | Descrição | Formato (tipo de valor) | Exemplo |
@@ -41,7 +43,7 @@ os atuais incluem O₂, som, resistência do gás e magnetómetro.
 | `state` | Estado/fase atual do voo. | Texto não vazio | `"SUBIDA"` |
 | `data` | Objeto com medições dos sensores e estado do paraquedas. | Objeto JSON | `{...}` |
 | `link` | Objeto com métricas da ligação de rádio. | Objeto JSON | `{...}` |
-| `crc` | CRC32 do pacote sem este campo, calculado sobre JSON canónico (chaves ordenadas e sem espaços). | Texto hexadecimal, 1–8 caracteres | `"C891D935"` |
+| `crc` | CRC32 do pacote simples, sem este campo, calculado sobre JSON canónico. O pacote AES-GCM usa a tag autenticadora do envelope. | Texto hexadecimal; ausente no pacote interno cifrado | `"C891D935"` |
 | `data.altitude` | Altitude. O simulador expressa em metros. | Número finito | `152.35` |
 | `data.velocity` | Velocidade vertical. O simulador expressa em m/s. | Número finito | `32.1` |
 | `data.acceleration` | Aceleração. O simulador expressa em m/s². | Número finito | `23.7` |
@@ -49,10 +51,11 @@ os atuais incluem O₂, som, resistência do gás e magnetómetro.
 | `data.temperature` | Temperatura. O simulador expressa em °C. | Número finito | `18.2` |
 | `data.humidity` | Humidade relativa. O simulador expressa em percentagem. | Número finito | `55.0` |
 | `data.pressure` | Pressão atmosférica. O simulador expressa em hPa. | Número finito | `995.8` |
-| `data.sea_level_pressure_hpa` | Pressão de referência P0 usada pelo CanSat para calcular altitude; opcional para emissores antigos. | Número finito; opcional | `1013.25` |
+| `data.sea_level_pressure_hpa` | P0 configurada na GS; opcional nos pacotes recebidos. A GS acrescenta o valor usado no cálculo. | Número finito; opcional | `1013.25` |
 | `data.eco2` | Concentração equivalente de CO₂. O simulador expressa em ppm. | Número finito | `415` |
 | `data.tvoc` | Compostos orgânicos voláteis totais. O simulador expressa em ppb. | Número finito | `10` |
 | `data.uv` | Índice ultravioleta. | Número finito | `3.7` |
+| `data.uv_millivolts` | Tensão média medida no sensor UV; a GS converte para índice 0–10. | Número finito; opcional | `280.0` |
 | `data.lux` | Iluminância. O simulador expressa em lux. | Número finito | `43800` |
 | `data.acc_x` | Aceleração no eixo X do acelerómetro. | Número finito | `0.02` |
 | `data.acc_y` | Aceleração no eixo Y do acelerómetro. | Número finito | `-0.01` |
@@ -67,6 +70,7 @@ os atuais incluem O₂, som, resistência do gás e magnetómetro.
 | `data.gas_resistance_kohm` | Resistência do sensor de gás do BME680. | Número finito; opcional | `54.2` |
 | `data.oxygen_percent` | Concentração de O₂ indicada pelo Gravity SEN0465, em percentagem de volume. | Número finito; opcional | `20.9` |
 | `data.sound_rms_adc` | RMS do sinal do microfone em contagens ADC; não é nível acústico calibrado. | Número finito; opcional | `18.4` |
+| `data.sound_adc_sum`, `data.sound_adc_sum_squares`, `data.sound_sample_count` | Estatísticas da janela ADC do microfone; a GS calcula RMS e dBFS. | Inteiros; opcionais | `204800`, `850000000`, `500` |
 | `data.sound_level_dbfs` | Nível relativo ao fundo de escala digital; não é dB SPL. | Número finito; opcional | `-38.2` |
 | `data.mag_x`, `data.mag_y`, `data.mag_z` | Componentes do campo magnético do HMC5883L. | Número finito; opcional | `39.4` |
 | `data.heading` | Rumo magnético horizontal calculado sem compensação de inclinação. | Número finito; opcional | `12.5` |
@@ -76,9 +80,10 @@ os atuais incluem O₂, som, resistência do gás e magnetómetro.
 | `link.packet_loss` | Estimativa da perda de pacotes reportada pelo emissor. O simulador envia `0.0` ou `2.5`. | Número finito; opcional | `0.0` |
 
 `data` e `link` têm de ser objetos JSON com os respetivos campos, não texto
-contendo JSON. O CRC é calculado sobre o objeto completo sem `crc`; a
-representação usada para o cálculo ordena as chaves e remove espaços, e o
-resultado é transmitido como hexadecimal. O ficheiro
+contendo JSON. Nos emissores sem encriptação, o CRC é calculado sobre o objeto
+completo sem `crc`; a representação usada para o cálculo ordena as chaves e
+remove espaços. O novo firmware envolve o pacote num envelope AES-256-GCM;
+a GS autentica e decifra o envelope antes de processar os dados. O ficheiro
 [FORMATO_TELEMETRIA.txt](FORMATO_TELEMETRIA.txt) contém pacotes de exemplo.
 
 O firmware integrado atual está em [Sensores/CanSat/CanSat.ino](Sensores/CanSat/CanSat.ino).
@@ -86,12 +91,13 @@ Instruções de bibliotecas, pinos e teste por USB estão em
 [Sensores/CanSat/README.md](Sensores/CanSat/README.md). Os emissores antigos
 continuam aceites; os gráficos de O2 e som já estão disponíveis na GS. A
 GS também inclui um widget **Sensores** com o estado e as respetivas
-medições. O firmware transmite três pacotes por segundo, atualiza o BME680 a
-5 Hz e o SGP30 a 1 Hz; cada pacote leva o último valor guardado por sensor.
-Na GS, o campo **P0 ao nível do mar (hPa)** configura a referência usada pelo
-ESP32 para calcular altitude; o valor inicial é 1013,25 hPa e a alteração não
-persiste após reiniciar. A HuskyLens e a ligação APC220 do novo firmware ficam
-para etapas posteriores.
+medições. O firmware agenda cinco pacotes por segundo (200 ms), cifrados com
+AES-256-GCM; o BME680 atualiza a 5 Hz e o SGP30 a 1 Hz, repetindo-se o último
+valor disponível entre leituras. Configura-se uma chave partilhada em
+`Sensores/CanSat/CanSatSecrets.h`, usada pela GS e pelo firmware. A GS calcula
+altitude, velocidade, aceleração e outros valores derivados; o campo
+**P0 ao nível do mar (hPa)** aplica-se localmente por CanSat. A HuskyLens e a
+ligação APC220 do novo firmware ficam para etapas posteriores.
 
 ## Estrutura
 
@@ -218,5 +224,5 @@ Web e WebSocket.
 ## Resolução de problemas
 
 - **Porta ocupada:** verifica se já existe uma GS em execução. Não arranques as variantes UDP e serial em paralelo.
-- **Pacotes rejeitados:** confirma que o emissor envia CANSAT-TLM v1, inclui os campos obrigatórios e calcula o CRC32 sobre o objeto sem o campo `crc`.
+- **Pacotes rejeitados:** confirma que o emissor envia CANSAT-TLM v1 e inclui os campos obrigatórios. Em pacotes simples, verifica também o CRC32; para AES-GCM, confirma que ESP e GS usam a mesma chave privada.
 - **Erro ao iniciar o simulador no Windows:** usa `iniciar_simulador.bat` e confirma que g++ e as DLLs do MSYS2 estão instalados; para um MSYS2 fora de `C:\msys64`, adiciona `ucrt64\bin` ao PATH.

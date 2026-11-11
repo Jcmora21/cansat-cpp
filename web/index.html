@@ -355,12 +355,13 @@
                        style="background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:8px;">
             </label>
             <span id="p0Target" style="font-size:0.85em;color:#94a3b8;">CanSat destino: à espera de telemetria</span>
-            <button class="btn btn-export" id="btnSetP0" onclick="sendP0Command()">Aplicar P0</button>
+            <button class="btn btn-export" id="btnSetP0" onclick="applyP0ToGroundStation()">Aplicar P0</button>
             <span id="p0CommandStatus" role="status" style="font-size:0.85em;color:#94a3b8;"></span>
         </div>
         <div style="font-size:0.78em;color:#64748b;margin-top:8px;">
-            Introduz a pressão de referência ao nível do mar em hPa. O CanSat selecionado
-            (ou o último a transmitir) calcula a altitude barométrica usando este valor.
+            Introduz a pressão de referência ao nível do mar em hPa. A GS usa este valor
+            para calcular altitude, velocidade e aceleração do CanSat selecionado
+            (ou do último a transmitir).
             Intervalo aceite: 100–1200 hPa.
         </div>
     </div>
@@ -1760,7 +1761,8 @@ function selectCansat(id) {
             updateHabitability(data);
             updateSensorWidget(data);
             if (data.sea_level_pressure_hpa !== undefined &&
-                data.sea_level_pressure_hpa !== null) {
+                data.sea_level_pressure_hpa !== null &&
+                (selectedCansat === null || data.cansat_id === selectedCansat)) {
                 const p0Input = document.getElementById('p0Input');
                 if (document.activeElement !== p0Input) {
                     p0Input.value = Number(data.sea_level_pressure_hpa).toFixed(2);
@@ -1835,13 +1837,13 @@ function selectCansat(id) {
             }
         }
 
-        function sendP0Command() {
+        function applyP0ToGroundStation() {
             const status = document.getElementById('p0CommandStatus');
             const value = Number(document.getElementById('p0Input').value);
             const cansatId = selectedCansat ?? latestCansatId;
 
             if (currentMode !== 'live') {
-                status.textContent = 'Muda para LIVE para enviar P0.';
+                status.textContent = 'Muda para LIVE para aplicar P0.';
                 return;
             }
             if (ws.readyState !== WebSocket.OPEN) {
@@ -1857,13 +1859,12 @@ function selectCansat(id) {
                 return;
             }
 
-            const command = `set_p0:${value.toFixed(2)}`;
             pendingP0CansatId = cansatId;
-            status.textContent = `A enviar ${value.toFixed(2)} hPa para o CanSat ${cansatId}…`;
+            status.textContent = `A aplicar P0 na GS para o CanSat ${cansatId}…`;
             ws.send(JSON.stringify({
-                type: 'command',
+                type: 'set_p0',
                 cansat_id: cansatId,
-                command
+                sea_level_pressure_hpa: value
             }));
         }
 
@@ -1971,6 +1972,18 @@ function selectCansat(id) {
                 } else if (message.type === "packet_status") {
                     updatePacketCounters(message.cansat_id, message.packet_counts);
                     renderCansatOverview();
+                } else if (message.type === "p0_status") {
+                    if (message.cansat_id === pendingP0CansatId) {
+                        document.getElementById('p0CommandStatus').textContent =
+                            message.status === 'applied'
+                                ? `P0 ${Number(message.sea_level_pressure_hpa).toFixed(2)} hPa aplicada na GS para o CanSat ${message.cansat_id}.`
+                                : `P0 inválida ou não aplicada (${message.reason || 'erro'}).`;
+                        if (message.status === 'applied') {
+                            document.getElementById('p0Input').value =
+                                Number(message.sea_level_pressure_hpa).toFixed(2);
+                        }
+                        pendingP0CansatId = null;
+                    }
                 } else if (message.type === "command_status") {
                     if (message.cansat_id === pendingP0CansatId) {
                         document.getElementById('p0CommandStatus').textContent =
