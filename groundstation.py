@@ -101,6 +101,7 @@ csv_headers = [
 
 
 def init_csv(filename):
+    """Cria o CSV da sessão, escreve o cabeçalho e devolve ficheiro e writer."""
     output_file = open(filename, mode="w", newline="", encoding="utf-8-sig")
     writer = csv.writer(output_file, delimiter=CSV_DELIMITER)
     writer.writerow(csv_headers)
@@ -152,20 +153,24 @@ REQUIRED_LINK_FIELDS = ["rssi", "snr"]
 
 
 def reject_nonstandard_json_constant(value):
+    """Rejeita NaN e Infinity, que não fazem parte do padrão JSON."""
     raise ValueError(f"constante JSON nao permitida: {value}")
 
 
 def is_finite_number(value):
+    """Verifica se o valor é um número finito aceite pelo protocolo."""
     return (type(value) is int and value.bit_length() <= 1023) or (
         type(value) is float and math.isfinite(value)
     )
 
 
 def calculate_crc32(payload):
+    """Calcula o CRC32 hexadecimal usado para detetar erros em mensagens simples."""
     return format(zlib.crc32(payload.encode("utf-8")) & 0xFFFFFFFF, "08X")
 
 
 def protect_control_message(message):
+    """Devolve uma cópia da mensagem com CRC32 sobre o JSON canónico."""
     protected = message.copy()
     protected.pop("crc", None)
     checksum_payload = json.dumps(
@@ -176,6 +181,7 @@ def protect_control_message(message):
 
 
 def validate_telemetry_packet(packet):
+    """Valida estrutura, versão, campos e tipos de um pacote CANSAT-TLM."""
     if not isinstance(packet, dict):
         return False, ["packet"]
 
@@ -267,6 +273,7 @@ def validate_telemetry_packet(packet):
 
 
 def verify_packet_crc(packet):
+    """Confirma o CRC32 de um pacote simples ou de controlo."""
     crc_received = packet.get("crc")
     if not isinstance(crc_received, str) or not re.fullmatch(r"[0-9A-Fa-f]{1,8}", crc_received):
         return False
@@ -278,6 +285,7 @@ def verify_packet_crc(packet):
 
 
 def load_telemetry_aes_key():
+    """Lê uma vez a chave AES privada partilhada pelo firmware e pela GS."""
     global aes_telemetry_key, aes_key_checked, aes_key_error_logged
     if aes_key_checked:
         return aes_telemetry_key
@@ -314,6 +322,7 @@ def load_telemetry_aes_key():
 
 
 def decrypt_encrypted_telemetry(envelope):
+    """Autentica e decifra um envelope AES-GCM; devolve o JSON interior válido."""
     global aes_key_error_logged
     if (
         envelope.get("protocol") != "CANSAT-TLM-ENC"
@@ -367,6 +376,7 @@ def decrypt_encrypted_telemetry(envelope):
 
 
 def set_cansat_sea_level_pressure(message):
+    """Guarda P0 para um CanSat e reinicia as derivadas que dependem dela."""
     cansat_id = message.get("cansat_id")
     pressure = message.get("sea_level_pressure_hpa")
     if (
@@ -397,6 +407,7 @@ def set_cansat_sea_level_pressure(message):
 
 
 def update_ground_station_calculations(parsed):
+    """Normaliza tempo e calcula na GS UV, altitude, velocidade, rumo e som."""
     cansat_id = parsed.get("cansat_id")
     raw_mission_time = parsed.get("mission_time_ms")
     sequence = parsed.get("sequence")
@@ -421,6 +432,7 @@ def update_ground_station_calculations(parsed):
             and not rebooted
         )
         if rebooted:
+            # Alinha o novo millis() ao último instante conhecido para manter o CSV contínuo.
             previous_normalized_time = (
                 cansat["last_normalized_mission_time_ms"]
                 if cansat["last_normalized_mission_time_ms"] is not None
@@ -474,6 +486,7 @@ def update_ground_station_calculations(parsed):
     if not is_finite_number(parsed.get("altitude")) and (
         is_finite_number(pressure) and pressure > 0
     ):
+        # Equação barométrica; P0 é a pressão de referência configurada no painel.
         altitude = 44330.0 * (
             1.0 - (pressure / pressure_reference) ** 0.190294957
         )
@@ -489,6 +502,7 @@ def update_ground_station_calculations(parsed):
             if previous_time is not None and previous_altitude is not None:
                 delta_ms = normalized_time - previous_time
                 if 0 < delta_ms <= 2000:
+                    # Derivadas usam o intervalo real entre amostras, não a cadência ideal.
                     velocity = (altitude - previous_altitude) / (delta_ms / 1000.0)
                     parsed["velocidade"] = velocity
                     if previous_velocity is not None:
@@ -521,6 +535,7 @@ def update_ground_station_calculations(parsed):
         and is_finite_number(sound_adc_sum)
         and is_finite_number(sound_adc_sum_squares)
     ):
+        # RMS AC é calculado a partir das somas transmitidas pelo firmware.
         sound_mean = sound_adc_sum / sound_sample_count
         sound_variance = (
             sound_adc_sum_squares / sound_sample_count - sound_mean * sound_mean
@@ -540,6 +555,7 @@ def update_ground_station_calculations(parsed):
 
 
 def new_cansat_state():
+    """Cria o estado inicial, contadores e históricos limitados de um CanSat."""
     return {
         "latest": None,
         "history": [],
@@ -550,16 +566,18 @@ def new_cansat_state():
         "last_sequence": None,
         "last_raw_mission_time_ms": None,
         "last_normalized_mission_time_ms": None,
-        "mission_time_offset_ms": 0,
+        "mission_time_offset_ms": 0,  # Corrige o tempo quando o ESP32 reinicia.
         "last_derived_time_ms": None,
         "last_derived_altitude": None,
         "last_derived_velocity": None,
+        # Sets permitem consultas rápidas; deques limitam a memória usada.
         "seen_sequences": set(),
         "seen_sequence_order": deque(),
         "lost_sequences": set(),
         "lost_sequence_order": deque(),
         "incomplete_sequences": set(),
         "incomplete_sequence_order": deque(),
+        # Contadores cumulativos usados pelo painel e pelo diagnóstico da ligação.
         "lost_packets": 0,
         "incomplete_packets": 0,
         "invalid_crc_packets": 0,
@@ -569,6 +587,7 @@ def new_cansat_state():
 
 
 def update_auto_csv_logging(parsed):
+    """Encerra a gravação automática 30 s após aterrarem todos os CanSats ativos."""
     global csv_logging_enabled
 
     cansat_id = parsed.get("cansat_id")
@@ -623,6 +642,7 @@ def update_auto_csv_logging(parsed):
 
 
 def get_cansat_state(cansat_id):
+    """Obtém o estado do CanSat, criando-o na primeira telemetria recebida."""
     with cansats_lock:
         if cansat_id not in cansats:
             cansats[cansat_id] = new_cansat_state()
@@ -630,6 +650,7 @@ def get_cansat_state(cansat_id):
 
 
 def classify_sequence(cansat, sequence):
+    """Conta pacotes recebidos, duplicados e lacunas da sequência."""
     if sequence in cansat["seen_sequences"]:
         cansat["duplicate_packets"] += 1
         return "duplicate", []
@@ -645,6 +666,7 @@ def classify_sequence(cansat, sequence):
     newly_lost = []
 
     if last_sequence is not None and sequence > last_sequence + 1:
+        # Uma lacuna é provisória: o pacote em falta pode chegar mais tarde.
         for missing_sequence in range(last_sequence + 1, sequence):
             if (
                 missing_sequence not in cansat["seen_sequences"]
@@ -672,6 +694,7 @@ def classify_sequence(cansat, sequence):
 
 
 def record_incomplete_packet(cansat, sequence):
+    """Regista um pacote incompleto e retira a sequência da lista de perdas."""
     cansat["incomplete_packets"] += 1
     if sequence is not None:
         if sequence in cansat["lost_sequences"]:
@@ -688,17 +711,20 @@ def record_incomplete_packet(cansat, sequence):
 
 
 def remember_bounded_sequence(cansat, set_key, order_key, sequence):
+    """Guarda uma sequência sem deixar o histórico crescer além do limite."""
     values = cansat[set_key]
     order = cansat[order_key]
     if sequence in values:
         return
     if len(order) >= MAX_FLIGHT_HISTORY:
+        # Descarta da fila e do set a sequência mais antiga.
         values.discard(order.popleft())
     values.add(sequence)
     order.append(sequence)
 
 
 def forget_bounded_sequence(cansat, set_key, order_key, sequence):
+    """Remove uma sequência de ambos os registos limitados."""
     cansat[set_key].discard(sequence)
     order = cansat[order_key]
     if sequence in order:
@@ -706,6 +732,7 @@ def forget_bounded_sequence(cansat, set_key, order_key, sequence):
 
 
 def get_packet_counts(cansat):
+    """Devolve os contadores de pacotes para o painel e eventos WebSocket."""
     return {
         "received": cansat["received_packets"],
         "lost": cansat["lost_packets"],
@@ -716,6 +743,7 @@ def get_packet_counts(cansat):
 
 
 def receiving_state_event():
+    """Devolve o estado de captura e gravação visível no painel."""
     with capture_state_lock:
         return {
             "type": "receiver_state",
@@ -726,27 +754,32 @@ def receiving_state_event():
 
 
 def append_bounded(history, payload, limit=MAX_FLIGHT_HISTORY):
+    """Acrescenta um item ao histórico e descarta os mais antigos excedentes."""
     history.append(payload)
     if len(history) > limit:
         del history[:-limit]
 
 
 class UDPTransport:
-    """Adaptador de transporte; o protocolo nao depende do radio utilizado."""
+    """Transporte UDP para a GS, independente do protocolo de telemetria."""
 
     def __init__(self, host, port):
+        """Abre e associa o socket UDP ao endereço local configurado."""
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.socket.bind((host, port))
 
     def receive(self):
+        """Espera e devolve um datagrama e o endereço do emissor."""
         return self.socket.recvfrom(4096)
 
     def send(self, payload, address):
+        """Envia texto UTF-8 num datagrama para o endereço indicado."""
         self.socket.sendto(payload.encode("utf-8"), address)
 
 
 def send_ack(cansat_id, sequence, address):
+    """Envia confirmação CRC para pacotes simples que a suportam."""
     if transport is None:
         return
     ack = protect_control_message(
@@ -756,11 +789,13 @@ def send_ack(cansat_id, sequence, address):
 
 
 def emit_event(event):
+    """Agenda o envio de um evento JSON a todos os clientes WebSocket."""
     if CONNECTED_CLIENTS:
         asyncio.run_coroutine_threadsafe(broadcast(json.dumps(event)), loop)
 
 
 def handle_command(message):
+    """Valida e encaminha um comando para o CanSat associado ao emissor."""
     cansat_id = message.get("cansat_id")
     command = message.get("command")
     if type(cansat_id) is not int or not isinstance(command, str) or not command:
@@ -784,6 +819,7 @@ def handle_command(message):
 
 # --- RECEIVER DO TRANSPORTE ---
 def transport_receiver(transport_factory=UDPTransport):
+    """Recebe, valida, calcula, conta, grava e publica pacotes de telemetria."""
     global latest_packet, flight_history, transport, discarded_while_paused
 
     transport = transport_factory("127.0.0.1", 5005)
@@ -1067,6 +1103,7 @@ def transport_receiver(transport_factory=UDPTransport):
                 "packet_counts": packet_counts,
             })
 def check_cansat_status():
+    """Marca como offline CanSats sem pacotes recentes e publica a alteração."""
     while True:
         try:
             agora = time.time()
@@ -1097,6 +1134,7 @@ def check_cansat_status():
 
 
 async def broadcast(message):
+    """Envia uma mensagem a todos os clientes e remove ligações com erro."""
     if CONNECTED_CLIENTS:
         clients = tuple(CONNECTED_CLIENTS)
         results = await asyncio.gather(
@@ -1111,6 +1149,7 @@ async def broadcast(message):
 
 # --- WEBSOCKET SERVER ---
 async def ws_handler(websocket):
+    """Serve um cliente WebSocket, envia o histórico e processa ações do painel."""
     global capture_enabled, discarded_while_paused, flight_history, latest_packet
     CONNECTED_CLIENTS.add(websocket)
     try:
@@ -1175,6 +1214,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 class SimpleHTTPHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        """Serve a página da GS ou o CSV completo da sessão."""
         if self.path == "/download_csv":
             try:
                 with capture_state_lock:
@@ -1206,10 +1246,12 @@ class SimpleHTTPHandler(BaseHTTPRequestHandler):
         self.wfile.write(HTML_CODE.encode("utf-8"))
 
     def log_message(self, format, *args):
+        """Desativa logs HTTP padrão para evitar ruído no terminal."""
         return
 
 
 def run_http_server():
+    """Inicia o servidor HTTP local que apresenta a página da GS."""
     server = HTTPServer(("127.0.0.1", 8050), SimpleHTTPHandler)
     print("🌐 [Web Server] Aceda ao site em: http://127.0.0.1:8050")
     server.serve_forever()
@@ -1219,6 +1261,7 @@ loop = None
 
 
 async def main(transport_factory=UDPTransport):
+    """Inicia receção, monitorização, HTTP e WebSocket da Ground Station."""
     global loop
     loop = asyncio.get_running_loop()
 

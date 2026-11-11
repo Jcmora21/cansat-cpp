@@ -50,6 +50,7 @@ constexpr size_t MAX_TELEMETRY_JSON_SIZE = 2048;
 constexpr size_t MAX_TELEMETRY_BASE64_SIZE =
     ((MAX_TELEMETRY_JSON_SIZE + 2) / 3) * 4 + 1;
 
+// Estados de disponibilidade e temporizadores dos sensores/cadência de envio.
 Adafruit_BME680 bme(BME_CS, BME_MOSI, BME_MISO, BME_SCK);
 Adafruit_SGP30 sgp;
 Adafruit_TSL2561_Unified tsl(TSL2561_ADDR_FLOAT, 12345);
@@ -62,7 +63,7 @@ bool tslAvailable = false;
 bool magnetometerAvailable = false;
 bool oxygenAvailable = false;
 bool bmeReadingPending = false;
-uint32_t sequenceNumber = 0;
+uint32_t sequenceNumber = 0;  // Identifica pacotes e completa lacunas de envio.
 uint32_t nextTelemetryTime = 0;
 uint32_t previousBmeStartTime = 0;
 uint32_t previousSgp30Time = 0;
@@ -76,7 +77,7 @@ uint16_t micSampleCount = 0;
 double micSum = 0.0;
 double micSumSquares = 0.0;
 uint8_t aesKey[AES_KEY_SIZE];
-uint64_t bootCounter = 0;
+uint64_t bootCounter = 0;  // Persistido na NVS para não repetir nonces após reinício.
 Preferences noncePreferences;
 mbedtls_gcm_context aesGcm;
 bool encryptionReady = false;
@@ -88,6 +89,7 @@ StaticJsonDocument<2048> telemetryPacket;
 StaticJsonDocument<4096> encryptedEnvelope;
 
 struct TelemetrySample {
+  // Últimas leituras válidas; NAN significa que o sensor ainda não forneceu valor.
   float temperature = NAN;
   float humidity = NAN;
   float pressure = NAN;
@@ -107,6 +109,7 @@ struct TelemetrySample {
 
 TelemetrySample latestTelemetrySample;
 
+// Escreve um número finito no JSON; valores indisponíveis são enviados como null.
 void setNullable(JsonObject object, const char *key, float value) {
   if (isfinite(value)) {
     object[key] = value;
@@ -115,6 +118,7 @@ void setNullable(JsonObject object, const char *key, float value) {
   }
 }
 
+// Converte um carácter hexadecimal num nibble; -1 indica carácter inválido.
 int hexDigit(char value) {
   if (value >= '0' && value <= '9') return value - '0';
   if (value >= 'a' && value <= 'f') return value - 'a' + 10;
@@ -122,6 +126,7 @@ int hexDigit(char value) {
   return -1;
 }
 
+// Lê a chave, incrementa o contador persistente de arranques e prepara AES-GCM.
 bool initializeEncryption() {
   static_assert(sizeof(CANSAT_AES_KEY_HEX) == AES_KEY_SIZE * 2 + 1,
                 "CANSAT_AES_KEY_HEX must contain exactly 64 hex characters.");
@@ -151,6 +156,7 @@ bool initializeEncryption() {
                             AES_KEY_SIZE * 8) == 0;
 }
 
+// Inicializa os barramentos, deteta sensores e prepara as suas configurações.
 void initializeSensors() {
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setClock(100000);
@@ -206,6 +212,7 @@ void initializeSensors() {
       oxygenAvailable ? "ok" : "missing");
 }
 
+// Faz a leitura BME680 sem bloquear à espera do fim da conversão.
 void updateBme680(TelemetrySample &sample, uint32_t now) {
   if (!bmeAvailable) {
     return;
@@ -230,6 +237,7 @@ void updateBme680(TelemetrySample &sample, uint32_t now) {
   }
 }
 
+// Atualiza eCO2/TVOC a 1 Hz; entre leituras mantém os últimos valores em cache.
 void readSgp30(TelemetrySample &sample, uint32_t now) {
   if (!sgpAvailable || now - previousSgp30Time < SGP30_INTERVAL_MS) {
     return;
@@ -242,6 +250,7 @@ void readSgp30(TelemetrySample &sample, uint32_t now) {
   }
 }
 
+// Lê a iluminância do TSL2561 quando o sensor foi detetado.
 void readTsl2561(TelemetrySample &sample) {
   if (!tslAvailable) {
     return;
@@ -253,6 +262,7 @@ void readTsl2561(TelemetrySample &sample) {
   }
 }
 
+// Lê os três eixos magnéticos; a GS calcula o rumo a partir deles.
 void readMagnetometer(TelemetrySample &sample) {
   if (!magnetometerAvailable) {
     return;
@@ -264,6 +274,7 @@ void readMagnetometer(TelemetrySample &sample) {
   sample.magZ = event.magnetic.z;
 }
 
+// Acumula 20 amostras de tensão UV e publica a média em milivolts.
 void updateUv(TelemetrySample &sample, uint32_t now) {
   if (static_cast<int32_t>(now - nextUvSampleTime) < 0) return;
   nextUvSampleTime = now + 2;
@@ -276,12 +287,14 @@ void updateUv(TelemetrySample &sample, uint32_t now) {
   uvSampleCount = 0;
 }
 
+// Copia a concentração de oxigénio quando o sensor indica dados disponíveis.
 void readOxygen(TelemetrySample &sample) {
   if (oxygenAvailable && oxygenSensor.dataIsAvailable()) {
     sample.oxygenPercent = AllDataAnalysis.gasconcentration;
   }
 }
 
+// Recolhe 500 amostras ADC e guarda soma/soma dos quadrados para a GS calcular RMS.
 void updateMicrophone(TelemetrySample &sample, uint32_t nowMicros) {
   if (static_cast<int32_t>(nowMicros - nextMicSampleTime) < 0) return;
   nextMicSampleTime = nowMicros + MIC_SAMPLE_INTERVAL_US;
@@ -299,11 +312,13 @@ void updateMicrophone(TelemetrySample &sample, uint32_t nowMicros) {
   micSampleCount = 0;
 }
 
+// Monta JSON CANSAT-TLM, cifra-o com AES-GCM e escreve o envelope pela USB serial.
 void sendTelemetry(const TelemetrySample &sample, uint32_t now) {
   telemetryPacket.clear();
   JsonDocument &packet = telemetryPacket;
   packet["cansat_id"] = CANSAT_ID;
 
+  // Campos derivados ficam null: altitude, velocidade e métricas são calculadas na GS.
   JsonObject data = packet.createNestedObject("data");
   setNullable(data, "acc_x", NAN);
   setNullable(data, "acc_y", NAN);
@@ -352,6 +367,7 @@ void sendTelemetry(const TelemetrySample &sample, uint32_t now) {
 
   packet["mission_time_ms"] = now;
   packet["protocol"] = "CANSAT-TLM";
+  // Cada transmissão consome uma sequência; slots perdidos também são contados no loop.
   const uint32_t sequence = sequenceNumber++;
   packet["sequence"] = sequence;
   packet["state"] = "SENSOR";
@@ -368,6 +384,7 @@ void sendTelemetry(const TelemetrySample &sample, uint32_t now) {
     return;
   }
 
+  // Nonce único por chave: contador de arranques persistido + sequência do pacote.
   uint8_t nonce[AES_GCM_NONCE_SIZE];
   for (uint8_t index = 0; index < 8; ++index) {
     nonce[index] = static_cast<uint8_t>(bootCounter >> (56 - index * 8));
@@ -377,6 +394,7 @@ void sendTelemetry(const TelemetrySample &sample, uint32_t now) {
   nonce[10] = static_cast<uint8_t>(sequence >> 8);
   nonce[11] = static_cast<uint8_t>(sequence);
 
+  // AAD não é cifrada, mas fica autenticada para vincular protocolo, versão e CanSat.
   char additionalData[40];
   const int aadLength = snprintf(additionalData, sizeof(additionalData),
                                 "CANSAT-TLM-ENC|1|%u",
@@ -432,6 +450,7 @@ void sendTelemetry(const TelemetrySample &sample, uint32_t now) {
   Serial.println();
 }
 
+// Arranque: configura a serial, valida AES e inicializa sensores e temporizadores.
 void setup() {
   Serial.begin(115200);
   if (!initializeEncryption()) {
@@ -449,6 +468,7 @@ void setup() {
   nextMicSampleTime = micros();
 }
 
+// Ciclo cooperativo: atualiza sensores em cache e transmite em slots nominais de 200 ms.
 void loop() {
   if (!encryptionReady) {
     delay(1000);
@@ -473,6 +493,7 @@ void loop() {
     sendTelemetry(latestTelemetrySample, nextTelemetryTime);
     nextTelemetryTime += TELEMETRY_INTERVAL_MS;
     const uint32_t afterSend = millis();
+    // Se o processamento atrasou, salta slots e avança o contador sem enviar em rajada.
     while (static_cast<int32_t>(afterSend - nextTelemetryTime) >= 0) {
       ++sequenceNumber;
       nextTelemetryTime += TELEMETRY_INTERVAL_MS;
