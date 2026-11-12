@@ -6,6 +6,7 @@ import json
 import websockets
 import threading
 import csv
+import io
 import os
 import math
 import re
@@ -45,6 +46,41 @@ discarded_while_paused = 0
 MAX_FLIGHT_HISTORY = 2000
 CSV_DELIMITER = ";"
 TELEMETRY_INTERVAL_MS = 200
+CSV_DECIMAL_COLUMNS = {
+    "tempo",
+    "altitude",
+    "velocidade",
+    "aceleracao",
+    "forca_g",
+    "temperatura",
+    "humidade",
+    "pressao",
+    "eco2",
+    "tvoc",
+    "uv",
+    "uv_millivolts",
+    "lux",
+    "acc_x",
+    "acc_y",
+    "acc_z",
+    "gyro_x",
+    "gyro_y",
+    "gyro_z",
+    "pitch",
+    "roll",
+    "yaw",
+    "gas_resistance_kohm",
+    "oxygen_percent",
+    "sound_rms_adc",
+    "sound_level_dbfs",
+    "mag_x",
+    "mag_y",
+    "mag_z",
+    "heading",
+    "sea_level_pressure_hpa",
+    "rssi",
+    "snr",
+}
 AES_KEY_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "Sensores",
@@ -107,6 +143,31 @@ def init_csv(filename):
     writer.writerow(csv_headers)
     output_file.flush()
     return output_file, writer
+
+
+def format_csv_for_export(contents):
+    """Converte pontos decimais em vírgulas numa cópia CSV destinada a download."""
+    source = io.StringIO(contents.decode("utf-8-sig"), newline="")
+    output = io.StringIO(newline="")
+    reader = csv.reader(source, delimiter=CSV_DELIMITER)
+    writer = csv.writer(output, delimiter=CSV_DELIMITER, lineterminator="\r\n")
+    headers = next(reader, [])
+    writer.writerow(headers)
+
+    for row in reader:
+        for index, header in enumerate(headers):
+            if header not in CSV_DECIMAL_COLUMNS or index >= len(row):
+                continue
+            value = row[index]
+            try:
+                is_finite_decimal = math.isfinite(float(value)) and "." in value
+            except ValueError:
+                continue
+            if is_finite_decimal:
+                row[index] = value.replace(".", ",")
+        writer.writerow(row)
+
+    return ("\ufeff" + output.getvalue()).encode("utf-8")
 
 
 csv_file, csv_writer = init_csv(csv_filename)
@@ -1219,7 +1280,7 @@ class SimpleHTTPHandler(BaseHTTPRequestHandler):
             try:
                 with capture_state_lock:
                     with open(csv_filename, "rb") as file:
-                        contents = file.read()
+                        contents = format_csv_for_export(file.read())
             except FileNotFoundError:
                 self.send_error(404, "CSV de voo nao encontrado")
                 return

@@ -2387,6 +2387,49 @@ function selectCansat(id) {
                 "snr"
             ];
 
+            const decimalCsvHeaders = new Set([
+                "tempo",
+                "altitude",
+                "velocidade",
+                "aceleracao",
+                "forca_g",
+                "temperatura",
+                "humidade",
+                "pressao",
+                "eco2",
+                "tvoc",
+                "uv",
+                "lux",
+                "acc_x",
+                "acc_y",
+                "acc_z",
+                "gyro_x",
+                "gyro_y",
+                "gyro_z",
+                "pitch",
+                "roll",
+                "yaw",
+                "gas_resistance_kohm",
+                "oxygen_percent",
+                "sound_rms_adc",
+                "sound_level_dbfs",
+                "mag_x",
+                "mag_y",
+                "mag_z",
+                "heading",
+                "sea_level_pressure_hpa",
+                "rssi",
+                "snr"
+            ]);
+
+            function formatCsvDecimal(value) {
+                const text = String(value);
+                if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)) {
+                    return value;
+                }
+                return text.replace(".", ",");
+            }
+
             function escapeCSV(value) {
                 if (value === undefined || value === null) {
                     return "";
@@ -2411,7 +2454,15 @@ function selectCansat(id) {
 
                 rows.forEach(row => {
                     csv += headers
-                        .map(header => escapeCSV(row[header]))
+                        .map(header => {
+                            const value = row[header];
+                            const exportValue = decimalCsvHeaders.has(header)
+                                && value !== undefined
+                                && value !== null
+                                ? formatCsvDecimal(value)
+                                : value;
+                            return escapeCSV(exportValue);
+                        })
                         .join(";") + "\n";
                 });
 
