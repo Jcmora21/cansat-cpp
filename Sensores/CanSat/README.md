@@ -33,6 +33,17 @@ aparecem codificados em Base64 no envelope serial, mas as medições ficam
 cifradas. O contador de arranques guardado na NVS impede reutilizar nonces
 após um reinício normal; não apagues a NVS mantendo a mesma chave AES.
 
+## Formato compacto da telemetria
+
+O conteúdo cifrado é um array JSON posicional de 17 valores, sem nomes de
+campos. A ordem é fixa: `[mission_time_ms, sensor_status, temperature,
+humidity, pressure, gas_resistance_kohm, eco2, tvoc, lux, uv_millivolts,
+oxygen_percent, mag_x, mag_y, mag_z, sound_adc_sum,
+sound_adc_sum_squares, sound_sample_count]`. Uma medição indisponível aparece
+como `null`, sem deslocar as posições seguintes. O CanSat ID está no envelope
+autenticado; a GS obtém o número de sequência a partir do nonce autenticado.
+A tabela completa e os tipos estão no README principal.
+
 ## Bibliotecas Arduino
 
 Instala pelo Arduino IDE > Library Manager:
@@ -70,12 +81,11 @@ sensores I2C partilham o mesmo barramento configurado a 100 kHz.
 
 ## Dados e limitações nesta fase
 
-- O ESP envia pressão e outros valores medidos, deixando `altitude`,
-  `velocity`, `acceleration`, `heading` e `sound_level_dbfs` nulos. A GS
-  calcula esses campos a partir da pressão, P0, tempo de missão, magnetómetro
-  e estatísticas ADC do microfone. O firmware envia a tensão UV média; a GS
-  converte-a para o índice UV de 0–10. P0 é configurado na GS e mantém-se por
-  CanSat durante a sessão da GS.
+- O ESP envia as leituras medidas numa lista posicional fixa. Leituras
+  indisponíveis ocupam o respetivo índice como `null`; não envia campos
+  derivados. A GS calcula altitude, velocidade, aceleração, rumo, índice UV e
+  métricas do som. P0 é configurado na GS e mantém-se por CanSat durante a
+  sessão.
 - `oxygen_percent` representa a concentração reportada pelo SEN0465 em
   percentagem de volume; humidade e oxigénio são transmitidos arredondados a
   duas casas decimais. `gas_resistance_kohm` é a resistência do sensor de gás
@@ -84,13 +94,10 @@ sensores I2C partilham o mesmo barramento configurado a 100 kHz.
   900 mV = índice 10, limitado à escala 0–10. É uma estimativa a validar
   contra uma referência UV.
 - `sound_level_dbfs` é relativo à escala ADC e não é dB SPL calibrado.
-- O HMC5883L produz magnetómetro/rumo magnético; não substitui um IMU. Os
-  campos de acelerómetro/giroscópio, atitude e paraquedas ficam `null` até
-  existir hardware para os medir.
-- `rssi`, `snr` e `packet_loss` ficam `null` enquanto o rádio não fornecer
-  essas medições. Os sensores não encontrados são indicados como `missing`
-  em `sensor_status`; as suas medições ficam `null`, nunca são substituídas
-  por zeros.
+- O HMC5883L produz magnetómetro/rumo magnético; não substitui um IMU.
+  Acelerómetro, giroscópio, atitude, paraquedas e métricas de rádio não são
+  incluídos porque esta versão não os mede. Os sensores não encontrados são
+  indicados como `missing` em `sensor_status`; as suas leituras são omitidas.
 - O estado de voo é enviado como `SENSOR`; esta versão não implementa uma
   máquina de estados de voo.
 

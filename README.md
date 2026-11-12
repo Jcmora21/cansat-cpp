@@ -19,17 +19,15 @@ Este repositório contém uma Ground Station para telemetria de **um ou vários 
 
 ## Campos do pacote de telemetria
 
-A GS recebe pacotes **CANSAT-TLM v1** neste formato JSON. A tabela descreve
-o pacote que o CanSat (ou o simulador) envia, antes de a GS converter os nomes
-para uso interno no painel e no CSV. Os campos listados são os nomes exatos
-esperados no protocolo.
+A tabela descreve o formato JSON CANSAT-TLM usado pelo simulador e internamente
+pela GS. No firmware AES-GCM, o conteúdo cifrado é uma lista posicional compacta
+documentada abaixo; a GS converte essa lista para este formato interno antes de
+validar, calcular derivados e atualizar o painel/CSV.
 
-Todos os campos de topo indicados, exceto `crc` nos pacotes cifrados, são
-obrigatórios. Dentro de `data`, todos os campos
-base indicados são obrigatórios, mas uma medição pode ser `null` se o sensor
-não existir ou não tiver produzido uma leitura válida. Em `link`, `rssi` e
-`snr` são obrigatórios e podem ser `null` quando o rádio não fornece essas
-métricas; `packet_loss` é opcional. Pacotes simples usam o campo `crc`;
+Os campos de topo do protocolo CANSAT-TLM são obrigatórios. Em pacotes simples
+protegidos por CRC, os campos base em `data` e `link` são obrigatórios. No
+firmware AES-GCM, `data` contém apenas as medições disponíveis após a conversão
+da lista posicional, e `link` fica vazio. Pacotes simples usam o campo `crc`;
 no firmware novo, AES-GCM autentica o envelope cifrado. Campos científicos
 adicionais em `data` são opcionais;
 os atuais incluem O₂, som, resistência do gás e magnetómetro.
@@ -87,6 +85,35 @@ completo sem `crc`; a representação usada para o cálculo ordena as chaves e
 remove espaços. O novo firmware envolve o pacote num envelope AES-256-GCM;
 a GS autentica e decifra o envelope antes de processar os dados. O ficheiro
 [FORMATO_TELEMETRIA.txt](FORMATO_TELEMETRIA.txt) contém pacotes de exemplo.
+
+### Lista posicional cifrada do firmware
+
+O texto decifrado pelo AES-GCM é um array JSON com exatamente 17 posições.
+As posições não mudam quando uma leitura falta: nesse caso o valor é `null`.
+O CanSat ID segue no envelope autenticado; `sequence` é recuperado do nonce
+depois da autenticação, pelo que não ocupa uma posição no array.
+
+| Índice | Significado | Tipo |
+|---:|---|---|
+| 0 | `mission_time_ms` | Inteiro |
+| 1 | `sensor_status` | Texto |
+| 2 | `temperature` (°C) | Número ou `null` |
+| 3 | `humidity` (%) | Número ou `null` |
+| 4 | `pressure` (hPa) | Número ou `null` |
+| 5 | `gas_resistance_kohm` | Número ou `null` |
+| 6 | `eco2` (ppm) | Número ou `null` |
+| 7 | `tvoc` (ppb) | Número ou `null` |
+| 8 | `lux` | Número ou `null` |
+| 9 | `uv_millivolts` | Número ou `null` |
+| 10 | `oxygen_percent` (%) | Número ou `null` |
+| 11–13 | `mag_x`, `mag_y`, `mag_z` | Números ou `null` |
+| 14 | `sound_adc_sum` | Inteiro ou `null` |
+| 15 | `sound_adc_sum_squares` | Inteiro ou `null` |
+| 16 | `sound_sample_count` | Inteiro ou `null` |
+
+O array permanece cifrado; não contém nomes de campos repetidos. O envelope
+exterior continua JSON para transportar protocolo, CanSat ID, nonce, texto
+cifrado e tag de autenticação.
 
 O firmware integrado atual está em [Sensores/CanSat/CanSat.ino](Sensores/CanSat/CanSat.ino).
 Instruções de bibliotecas, pinos e teste por USB estão em

@@ -1,5 +1,22 @@
-{"protocol":"CANSAT-TLM","version":1,"type":"telemetry","cansat_id":1,"sequence":1,"mission_time_ms":200,"state":"ESPERA","data":{"altitude":0.0,"velocity":0.0,"acceleration":0.0,"force_g":0.0,"temperature":0.0,"humidity":0.0,"pressure":0.0,"eco2":0,"tvoc":0,"uv":0.0,"lux":0,"acc_x":0.0,"acc_y":0.0,"acc_z":0.0,"gyro_x":0.0,"gyro_y":0.0,"gyro_z":0.0,"pitch":0.0,"roll":0.0,"yaw":0.0,"parachute":false},"link":{"rssi":0.0,"snr":0.0,"packet_loss":0.0},"crc":"D85C161E"}
+O firmware AES-GCM cifra uma lista posicional fixa, sem nomes de campos. O envelope JSON exterior continua a incluir `cansat_id`; o número de sequência é recuperado do nonce autenticado. A lista tem exatamente esta ordem:
 
-{"protocol":"CANSAT-TLM","version":1,"type":"telemetry","cansat_id":2,"sequence":123,"mission_time_ms":24600,"state":"SUBIDA","data":{"altitude":152.35,"velocity":32.1,"acceleration":23.7,"force_g":3.4,"temperature":18.2,"humidity":55.0,"pressure":995.8,"eco2":415,"tvoc":10,"uv":3.7,"lux":43800,"acc_x":0.02,"acc_y":-0.01,"acc_z":2.4,"gyro_x":0.1,"gyro_y":-0.2,"gyro_z":120.0,"pitch":88.2,"roll":135.0,"yaw":45.0,"parachute":false},"link":{"rssi":-78.5,"snr":9.4,"packet_loss":0.0},"crc":"C891D935"}
+0 mission_time_ms
+1 sensor_status
+2 temperature
+3 humidity
+4 pressure
+5 gas_resistance_kohm
+6 eco2
+7 tvoc
+8 lux
+9 uv_millivolts
+10 oxygen_percent
+11 mag_x
+12 mag_y
+13 mag_z
+14 sound_adc_sum
+15 sound_adc_sum_squares
+16 sound_sample_count
 
-{"protocol":"CANSAT-TLM","version":1,"type":"telemetry","cansat_id":1,"sequence":1,"mission_time_ms":1000,"state":"SENSOR","data":{"altitude":0.0,"velocity":null,"acceleration":null,"force_g":null,"temperature":25.26,"humidity":55.0,"pressure":1006.72,"eco2":400,"tvoc":10,"uv":1.2,"lux":438.0,"acc_x":null,"acc_y":null,"acc_z":null,"gyro_x":null,"gyro_y":null,"gyro_z":null,"pitch":null,"roll":null,"yaw":null,"parachute":null,"gas_resistance_kohm":54.2,"oxygen_percent":20.9,"sound_rms_adc":18.4,"sound_level_dbfs":-38.2,"mag_x":39.4,"mag_y":0.3,"mag_z":43.3,"heading":12.5,"sensor_status":"bme680=ok;sgp30=ok;tsl2561=ok;hmc5883l=ok;sen0465=ok;max4466=configured;uv=configured"},"link":{"rssi":null,"snr":null,"packet_loss":null},"crc":"6ED6CF67"}
+Leituras indisponíveis são `null` e mantêm o lugar. Exemplo ilustrativo do conteúdo cifrado antes da encriptação:
+[1000,"bme680=ok;sgp30=ok;tsl2561=ok;hmc5883l=ok;sen0465=ok;max4466=configured;uv=configured",25.26,55.0,1006.72,54.2,400,10,438.0,280.0,20.9,39.4,0.3,43.3,204800,850000000,500]

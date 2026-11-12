@@ -110,12 +110,12 @@ struct TelemetrySample {
 
 TelemetrySample latestTelemetrySample;
 
-// Escreve um número finito no JSON; valores indisponíveis são enviados como null.
-void setNullable(JsonObject object, const char *key, float value) {
+// Acrescenta uma leitura na sua posição fixa; null mantém o alinhamento se faltar.
+void addNullable(JsonArray values, float value) {
   if (isfinite(value)) {
-    object[key] = value;
+    values.add(value);
   } else {
-    object[key] = nullptr;
+    values.add(nullptr);
   }
 }
 
@@ -313,67 +313,39 @@ void updateMicrophone(TelemetrySample &sample, uint32_t nowMicros) {
   micSampleCount = 0;
 }
 
-// Monta JSON CANSAT-TLM, cifra-o com AES-GCM e escreve o envelope pela USB serial.
+// Monta uma lista posicional de telemetria, cifra-a e escreve o envelope pela USB.
 void sendTelemetry(const TelemetrySample &sample, uint32_t now) {
   telemetryPacket.clear();
-  JsonDocument &packet = telemetryPacket;
-  packet["cansat_id"] = CANSAT_ID;
-
-  // Campos derivados ficam null: altitude, velocidade e métricas são calculadas na GS.
-  JsonObject data = packet.createNestedObject("data");
-  setNullable(data, "acc_x", NAN);
-  setNullable(data, "acc_y", NAN);
-  setNullable(data, "acc_z", NAN);
-  setNullable(data, "acceleration", NAN);
-  setNullable(data, "altitude", NAN);
-  setNullable(data, "eco2", sample.eco2);
-  setNullable(data, "force_g", NAN);
-  setNullable(data, "gas_resistance_kohm", sample.gasResistanceKohm);
-  setNullable(data, "gyro_x", NAN);
-  setNullable(data, "gyro_y", NAN);
-  setNullable(data, "gyro_z", NAN);
-  setNullable(data, "heading", NAN);
-  setNullable(data, "humidity", sample.humidity);
-  setNullable(data, "lux", sample.lux);
-  setNullable(data, "mag_x", sample.magX);
-  setNullable(data, "mag_y", sample.magY);
-  setNullable(data, "mag_z", sample.magZ);
-  setNullable(data, "oxygen_percent", sample.oxygenPercent);
-  data["parachute"] = nullptr;
-  setNullable(data, "pitch", NAN);
-  setNullable(data, "pressure", sample.pressure);
-  setNullable(data, "roll", NAN);
-  data["sensor_status"] = sensorStatusText;
-  setNullable(data, "sound_level_dbfs", NAN);
-  if (sample.soundSampleCount > 0) {
-    data["sound_adc_sum"] = sample.soundAdcSum;
-    data["sound_adc_sum_squares"] = sample.soundAdcSumSquares;
-  } else {
-    data["sound_adc_sum"] = nullptr;
-    data["sound_adc_sum_squares"] = nullptr;
-  }
-  setNullable(data, "sound_rms_adc", NAN);
-  data["sound_sample_count"] = sample.soundSampleCount;
-  setNullable(data, "temperature", sample.temperature);
-  setNullable(data, "tvoc", sample.tvoc);
-  setNullable(data, "uv", NAN);
-  setNullable(data, "uv_millivolts", sample.uvMillivolts);
-  setNullable(data, "velocity", NAN);
-  setNullable(data, "yaw", NAN);
-
-  JsonObject link = packet.createNestedObject("link");
-  link["packet_loss"] = nullptr;
-  link["rssi"] = nullptr;
-  link["snr"] = nullptr;
-
-  packet["mission_time_ms"] = now;
-  packet["protocol"] = "CANSAT-TLM";
   // Cada transmissão consome uma sequência; slots perdidos também são contados no loop.
   const uint32_t sequence = sequenceNumber++;
-  packet["sequence"] = sequence;
-  packet["state"] = "SENSOR";
-  packet["type"] = "telemetry";
-  packet["version"] = 1;
+
+  // Ordem fixa: tempo, estado dos sensores, temperatura, humidade, pressão,
+  // resistência do gás, eCO2, TVOC, lux, tensão UV, O2, mag X/Y/Z,
+  // soma ADC, soma dos quadrados ADC e quantidade de amostras do microfone.
+  JsonArray packet = telemetryPacket.to<JsonArray>();
+  packet.add(now);
+  packet.add(sensorStatusText);
+  addNullable(packet, sample.temperature);
+  addNullable(packet, sample.humidity);
+  addNullable(packet, sample.pressure);
+  addNullable(packet, sample.gasResistanceKohm);
+  addNullable(packet, sample.eco2);
+  addNullable(packet, sample.tvoc);
+  addNullable(packet, sample.lux);
+  addNullable(packet, sample.uvMillivolts);
+  addNullable(packet, sample.oxygenPercent);
+  addNullable(packet, sample.magX);
+  addNullable(packet, sample.magY);
+  addNullable(packet, sample.magZ);
+  if (sample.soundSampleCount > 0) {
+    packet.add(sample.soundAdcSum);
+    packet.add(sample.soundAdcSumSquares);
+    packet.add(sample.soundSampleCount);
+  } else {
+    packet.add(nullptr);
+    packet.add(nullptr);
+    packet.add(nullptr);
+  }
 
   const size_t expectedJsonLength = measureJson(packet);
   const size_t jsonLength =

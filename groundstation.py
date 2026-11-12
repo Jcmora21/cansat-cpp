@@ -241,8 +241,8 @@ def protect_control_message(message):
     return protected
 
 
-def validate_telemetry_packet(packet):
-    """Valida estrutura, versão, campos e tipos de um pacote CANSAT-TLM."""
+def validate_telemetry_packet(packet, allow_sparse=False):
+    """Valida CANSAT-TLM; AES-GCM pode omitir medições indisponíveis."""
     if not isinstance(packet, dict):
         return False, ["packet"]
 
@@ -255,20 +255,21 @@ def validate_telemetry_packet(packet):
     data = packet.get("data")
 
     if isinstance(data, dict):
-        for field in REQUIRED_DATA_FIELDS:
-            if field not in data:
-                missing.append(f"data.{field}")
+        if not allow_sparse:
+            for field in REQUIRED_DATA_FIELDS:
+                if field not in data:
+                    missing.append(f"data.{field}")
     else:
         missing.append("data")
 
     link = packet.get("link")
 
-    if isinstance(link, dict):
+    if not isinstance(link, dict):
+        missing.append("link")
+    elif not allow_sparse:
         for field in REQUIRED_LINK_FIELDS:
             if field not in link:
                 missing.append(f"link.{field}")
-    else:
-        missing.append("link")
 
     if missing:
         return False, missing
@@ -290,6 +291,8 @@ def validate_telemetry_packet(packet):
         return False, ["state"]
 
     for field in REQUIRED_DATA_FIELDS:
+        if field not in data:
+            continue
         value = data[field]
         if value is None:
             continue
@@ -326,6 +329,8 @@ def validate_telemetry_packet(packet):
         return False, ["data.sensor_status"]
 
     for field in REQUIRED_LINK_FIELDS:
+        if field not in link:
+            continue
         value = link[field]
         if value is not None and not is_finite_number(value):
             return False, [f"link.{field}"]
@@ -383,7 +388,7 @@ def load_telemetry_aes_key():
 
 
 def decrypt_encrypted_telemetry(envelope):
-    """Autentica e decifra um envelope AES-GCM; devolve o JSON interior válido."""
+    """Autentica o envelope e converte a lista posicional para o formato interno."""
     global aes_key_error_logged
     if (
         envelope.get("protocol") != "CANSAT-TLM-ENC"
@@ -424,15 +429,84 @@ def decrypt_encrypted_telemetry(envelope):
             aes_key_error_logged = True
         return None
 
+    if isinstance(packet, dict):
+        if (
+            packet.get("protocol") != "CANSAT-TLM"
+            or packet.get("cansat_id") != envelope["cansat_id"]
+        ):
+            if not aes_key_error_logged:
+                print("[AES-GCM] Pacote descartado: conteúdo desencriptado inválido.")
+                aes_key_error_logged = True
+            return None
+        return packet
+
     if (
-        not isinstance(packet, dict)
-        or packet.get("protocol") != "CANSAT-TLM"
-        or packet.get("cansat_id") != envelope["cansat_id"]
+        not isinstance(packet, list)
+        or len(packet) != 17
+        or type(packet[0]) is not int
+        or not 0 <= packet[0] <= 2**63 - 1
+        or not isinstance(packet[1], str)
+        or any(
+            value is not None and not is_finite_number(value)
+            for value in packet[2:14]
+        )
     ):
         if not aes_key_error_logged:
-            print("[AES-GCM] Pacote descartado: conteúdo desencriptado inválido.")
+            print("[AES-GCM] Pacote descartado: lista posicional inválida.")
             aes_key_error_logged = True
         return None
+
+    sound_statistics = packet[14:17]
+    if any(value is None for value in sound_statistics):
+        sound_statistics_valid = all(
+            value is None for value in sound_statistics
+        )
+    else:
+        sound_statistics_valid = (
+            all(type(value) is int and value >= 0 for value in sound_statistics)
+            and 1 <= sound_statistics[2] <= 500
+        )
+    if not sound_statistics_valid:
+        if not aes_key_error_logged:
+            print("[AES-GCM] Pacote descartado: estatísticas de som inválidas.")
+            aes_key_error_logged = True
+        return None
+
+    compact_data_fields = (
+        "temperature",
+        "humidity",
+        "pressure",
+        "gas_resistance_kohm",
+        "eco2",
+        "tvoc",
+        "lux",
+        "uv_millivolts",
+        "oxygen_percent",
+        "mag_x",
+        "mag_y",
+        "mag_z",
+        "sound_adc_sum",
+        "sound_adc_sum_squares",
+        "sound_sample_count",
+    )
+    data = {}
+    if packet[1] is not None:
+        data["sensor_status"] = packet[1]
+    for field, value in zip(compact_data_fields, packet[2:]):
+        if value is not None:
+            data[field] = value
+
+    packet = {
+        "protocol": "CANSAT-TLM",
+        "version": 1,
+        "type": "telemetry",
+        "cansat_id": envelope["cansat_id"],
+        "sequence": int.from_bytes(nonce[8:], "big"),
+        "mission_time_ms": packet[0],
+        "state": "SENSOR",
+        "data": data,
+        "link": {},
+    }
     return packet
 
 
@@ -967,7 +1041,10 @@ def transport_receiver(transport_factory=UDPTransport):
                 )
                 continue
 
-            valid, missing_fields = validate_telemetry_packet(packet)
+            valid, missing_fields = validate_telemetry_packet(
+                packet,
+                allow_sparse=is_encrypted_packet,
+            )
             if not valid:
                 cansat_id = packet.get("cansat_id")
                 sequence = packet.get("sequence")
@@ -1025,7 +1102,7 @@ def transport_receiver(transport_factory=UDPTransport):
                 "pitch": data_block.get("pitch"),
                 "roll": data_block.get("roll"),
                 "yaw": data_block.get("yaw"),
-                "paraquedas": data_block.get("parachute", False),
+                "paraquedas": data_block.get("parachute"),
                 "gas_resistance_kohm": data_block.get("gas_resistance_kohm"),
                 "oxygen_percent": data_block.get("oxygen_percent"),
                 "sound_rms_adc": data_block.get("sound_rms_adc"),
