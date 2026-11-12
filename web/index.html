@@ -455,6 +455,7 @@
                         </label>
                         <button class="btn btn-export" type="button" onclick="applyAltitudeRegression()">Aplicar regressão</button>
                         <span style="color:#f97316;font-size:0.8em;">— Regressão linear</span>
+                        <span id="altRegressionEquation" style="color:#f97316;font-size:0.8em;font-variant-numeric:tabular-nums;"></span>
                         <span id="altRegressionStatus" role="status" style="color:#94a3b8;font-size:0.8em;">Indica o intervalo em segundos.</span>
                     </div>
                     ` : ''}
@@ -502,6 +503,7 @@
             const slope = timeAltitudeCovariance / timeVariance;
             return {
                 slope,
+                intercept: meanAltitude - slope * meanTime,
                 meanTime,
                 meanAltitude,
                 startAltitude: meanAltitude + slope * (startTime - meanTime),
@@ -561,6 +563,7 @@
                 status.textContent = 'Indica tempos válidos: final maior que inicial.';
                 altitudeRegressionStart = null;
                 altitudeRegressionEnd = null;
+                document.getElementById('altRegressionEquation').textContent = '';
             } else {
                 altitudeRegressionStart = startTime;
                 altitudeRegressionEnd = endTime;
@@ -590,11 +593,14 @@
                 );
                 let fittedCanSats = 0;
                 const status = document.getElementById('altRegressionStatus');
+                const equation = document.getElementById('altRegressionEquation');
+                const equations = [];
                 if (startIndex === null || endIndex === null) {
                     if (status) {
                         status.textContent =
                             'São necessárias pelo menos duas leituras no intervalo.';
                     }
+                    if (equation) equation.textContent = '';
                     return;
                 }
 
@@ -610,6 +616,16 @@
                     );
                     if (!regression) return;
                     fittedCanSats++;
+                    const interceptSign = regression.intercept < 0 ? '−' : '+';
+                    const interceptMagnitude = Math.abs(regression.intercept);
+                    const equationText =
+                        `h(t) = ${regression.slope.toFixed(3)}t ${interceptSign} ` +
+                        `${interceptMagnitude.toFixed(3)} m`;
+                    equations.push(
+                        viewMode === 'general' && chart.data.datasets.length > 1
+                            ? `${dataset.label}: ${equationText}`
+                            : equationText
+                    );
 
                     const startX = xScale.getPixelForValue(startIndex);
                     const endX = xScale.getPixelForValue(endIndex);
@@ -633,6 +649,7 @@
                     context.stroke();
                     context.restore();
                 });
+                if (equation) equation.textContent = equations.join('  |  ');
                 if (status) {
                     if (fittedCanSats === 0) {
                         status.textContent =
