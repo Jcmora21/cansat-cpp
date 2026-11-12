@@ -39,6 +39,7 @@ constexpr uint8_t BME_CS = 21;
 constexpr uint8_t O2_I2C_ADDRESS = 0x74;
 constexpr uint32_t BME680_INTERVAL_MS = 200;
 constexpr uint32_t SGP30_INTERVAL_MS = 1000;
+constexpr uint32_t TELEMETRY_START_DELAY_MS = 10000;
 constexpr uint32_t TELEMETRY_INTERVAL_MS = 200;
 constexpr uint32_t AUXILIARY_SENSOR_INTERVAL_MS = 200;
 constexpr uint16_t MIC_SAMPLE_COUNT = 500;
@@ -463,12 +464,13 @@ void setup() {
   previousBmeStartTime = now - BME680_INTERVAL_MS;
   previousSgp30Time = now - SGP30_INTERVAL_MS;
   previousAuxiliarySensorTime = now - AUXILIARY_SENSOR_INTERVAL_MS;
-  nextTelemetryTime = now;
+  // Dá 10 s para estabilização antes do primeiro pacote; depois mantém slots de 200 ms.
+  nextTelemetryTime = now + TELEMETRY_START_DELAY_MS;
   nextUvSampleTime = now;
   nextMicSampleTime = micros();
 }
 
-// Ciclo cooperativo: atualiza sensores em cache e transmite em slots nominais de 200 ms.
+// Ciclo cooperativo: atualiza sensores em cache e transmite após a espera inicial, a cada 200 ms.
 void loop() {
   if (!encryptionReady) {
     delay(1000);

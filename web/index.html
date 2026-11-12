@@ -422,7 +422,7 @@
             { id: 'chartTemp', key: 'temperatura', label: 'Temperatura (°C)', color: '#ec4899' },
             { id: 'chartPress', key: 'pressao', label: 'Pressão (hPa)', color: '#8b5cf6' },
             { id: 'chartHum', key: 'humidade', label: 'Humidade (%)', color: '#06b6d4', decimals: 2 },
-            { id: 'chartUV', key: 'uv', label: 'Índice UV (0–10)', color: '#eab308', decimals: 2, yMin: 0, yMax: 10 },
+            { id: 'chartUV', key: 'uv', label: 'Índice UV (0–10)', color: '#eab308', decimals: 2 },
             { id: 'chartOxygen', key: 'oxygen_percent', label: 'Oxigénio (%)', color: '#2dd4bf', decimals: 2 },
             { id: 'chartSoundRms', key: 'sound_rms_adc', label: 'Som RMS (contagens ADC)', color: '#fb923c' },
             { id: 'chartSoundDbfs', key: 'sound_level_dbfs', label: 'Som relativo (dBFS, não calibrado)', color: '#c084fc' }
@@ -441,12 +441,274 @@
                             <span class="kpi-item">Méd: <span class="kpi-val" id="avg-${cfg.id}">-</span></span>
                         </div>
                     </div>
+                    ${cfg.id === 'chartAlt' ? `
+                    <div class="altitude-regression-controls" style="display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin:8px 0;">
+                        <label style="display:flex;flex-direction:column;gap:3px;color:#94a3b8;font-size:0.8em;">
+                            Tempo inicial (s)
+                            <input id="altRegressionStart" type="number" min="0" step="any" inputmode="decimal"
+                                   style="width:110px;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:6px;">
+                        </label>
+                        <label style="display:flex;flex-direction:column;gap:3px;color:#94a3b8;font-size:0.8em;">
+                            Tempo final (s)
+                            <input id="altRegressionEnd" type="number" min="0" step="any" inputmode="decimal"
+                                   style="width:110px;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:4px;padding:6px;">
+                        </label>
+                        <button class="btn btn-export" type="button" onclick="applyAltitudeRegression()">Aplicar regressão</button>
+                        <span style="color:#f97316;font-size:0.8em;">— Regressão linear</span>
+                        <span id="altRegressionStatus" role="status" style="color:#94a3b8;font-size:0.8em;">Indica o intervalo em segundos.</span>
+                    </div>
+                    ` : ''}
                     <canvas id="${cfg.id}"></canvas>
                 </div>
             `;
         });
 
-        function makeChart(id, label, color, yMin, yMax) {
+        let altitudeRegressionStart = null;
+        let altitudeRegressionEnd = null;
+
+        function parseChartTime(label) {
+            const time = Number.parseFloat(String(label).replace(/s$/, ''));
+            return Number.isFinite(time) ? time : null;
+        }
+
+        function calculateLinearRegression(data, labels, startTime, endTime) {
+            const points = [];
+            data.forEach((value, index) => {
+                if (value === null || value === undefined || value === '') return;
+                const time = parseChartTime(labels[index]);
+                const altitude = Number(value);
+                if (
+                    time !== null &&
+                    time >= startTime &&
+                    time <= endTime &&
+                    Number.isFinite(altitude)
+                ) {
+                    points.push({ time, altitude });
+                }
+            });
+            if (points.length < 2) return null;
+
+            const meanTime = points.reduce((sum, point) => sum + point.time, 0) / points.length;
+            const meanAltitude = points.reduce((sum, point) => sum + point.altitude, 0) / points.length;
+            let timeVariance = 0;
+            let timeAltitudeCovariance = 0;
+            points.forEach(point => {
+                const timeOffset = point.time - meanTime;
+                timeVariance += timeOffset * timeOffset;
+                timeAltitudeCovariance += timeOffset * (point.altitude - meanAltitude);
+            });
+            if (timeVariance === 0) return null;
+
+            const slope = timeAltitudeCovariance / timeVariance;
+            return {
+                slope,
+                meanTime,
+                meanAltitude,
+                startAltitude: meanAltitude + slope * (startTime - meanTime),
+                endAltitude: meanAltitude + slope * (endTime - meanTime)
+            };
+        }
+
+        function getChartIndexForTime(labels, targetTime) {
+            const times = labels.map(parseChartTime);
+            const validIndexes = times
+                .map((time, index) => time === null ? null : index)
+                .filter(index => index !== null);
+            if (validIndexes.length < 2) return null;
+
+            for (let position = 0; position < validIndexes.length - 1; position++) {
+                const leftIndex = validIndexes[position];
+                const rightIndex = validIndexes[position + 1];
+                const leftTime = times[leftIndex];
+                const rightTime = times[rightIndex];
+                if (leftTime === rightTime) continue;
+                if (targetTime >= leftTime && targetTime <= rightTime) {
+                    return leftIndex + (targetTime - leftTime) *
+                        (rightIndex - leftIndex) / (rightTime - leftTime);
+                }
+            }
+
+            const firstIndex = validIndexes[0];
+            const secondIndex = validIndexes[1];
+            const lastIndex = validIndexes[validIndexes.length - 1];
+            const previousIndex = validIndexes[validIndexes.length - 2];
+            if (targetTime < times[firstIndex] && times[secondIndex] !== times[firstIndex]) {
+                return firstIndex + (targetTime - times[firstIndex]) *
+                    (secondIndex - firstIndex) / (times[secondIndex] - times[firstIndex]);
+            }
+            if (targetTime > times[lastIndex] && times[lastIndex] !== times[previousIndex]) {
+                return previousIndex + (targetTime - times[previousIndex]) *
+                    (lastIndex - previousIndex) / (times[lastIndex] - times[previousIndex]);
+            }
+            return null;
+        }
+
+        function applyAltitudeRegression() {
+            const startInput = document.getElementById('altRegressionStart');
+            const endInput = document.getElementById('altRegressionEnd');
+            const status = document.getElementById('altRegressionStatus');
+            const startTime = Number(startInput.value);
+            const endTime = Number(endInput.value);
+
+            if (
+                startInput.value.trim() === '' ||
+                endInput.value.trim() === '' ||
+                !Number.isFinite(startTime) ||
+                !Number.isFinite(endTime) ||
+                startTime < 0 ||
+                endTime <= startTime
+            ) {
+                status.textContent = 'Indica tempos válidos: final maior que inicial.';
+                altitudeRegressionStart = null;
+                altitudeRegressionEnd = null;
+            } else {
+                altitudeRegressionStart = startTime;
+                altitudeRegressionEnd = endTime;
+                status.textContent = `Regressão entre ${startTime}s e ${endTime}s.`;
+            }
+            const chart = charts.chartAlt;
+            chart.update('none');
+        }
+
+        const altitudeRegressionPlugin = {
+            id: 'altitudeRegression',
+            afterDatasetsDraw(chart) {
+                if (
+                    altitudeRegressionStart === null ||
+                    altitudeRegressionEnd === null
+                ) return;
+
+                const xScale = chart.scales.x;
+                const yScale = chart.scales.y;
+                const startIndex = getChartIndexForTime(
+                    chart.data.labels,
+                    altitudeRegressionStart
+                );
+                const endIndex = getChartIndexForTime(
+                    chart.data.labels,
+                    altitudeRegressionEnd
+                );
+                let fittedCanSats = 0;
+                const status = document.getElementById('altRegressionStatus');
+                if (startIndex === null || endIndex === null) {
+                    if (status) {
+                        status.textContent =
+                            'São necessárias pelo menos duas leituras no intervalo.';
+                    }
+                    return;
+                }
+
+                const chartArea = chart.chartArea;
+                const context = chart.ctx;
+                chart.data.datasets.forEach((dataset, index) => {
+                    if (chart.getDatasetMeta(index).hidden) return;
+                    const regression = calculateLinearRegression(
+                        dataset.data,
+                        chart.data.labels,
+                        altitudeRegressionStart,
+                        altitudeRegressionEnd
+                    );
+                    if (!regression) return;
+                    fittedCanSats++;
+
+                    const startX = xScale.getPixelForValue(startIndex);
+                    const endX = xScale.getPixelForValue(endIndex);
+                    const startY = yScale.getPixelForValue(regression.startAltitude);
+                    const endY = yScale.getPixelForValue(regression.endAltitude);
+                    context.save();
+                    context.beginPath();
+                    context.rect(
+                        chartArea.left,
+                        chartArea.top,
+                        chartArea.right - chartArea.left,
+                        chartArea.bottom - chartArea.top
+                    );
+                    context.clip();
+                    context.beginPath();
+                    context.setLineDash([6, 4]);
+                    context.lineWidth = 2;
+                    context.strokeStyle = '#f97316';
+                    context.moveTo(startX, startY);
+                    context.lineTo(endX, endY);
+                    context.stroke();
+                    context.restore();
+                });
+                if (status) {
+                    if (fittedCanSats === 0) {
+                        status.textContent =
+                            'São necessárias pelo menos duas leituras no intervalo.';
+                    } else if (viewMode === 'general' && fittedCanSats > 1) {
+                        status.textContent =
+                            `Regressão entre ${altitudeRegressionStart}s e ` +
+                            `${altitudeRegressionEnd}s para ${fittedCanSats} CanSats.`;
+                    } else {
+                        status.textContent =
+                            `Regressão entre ${altitudeRegressionStart}s e ` +
+                            `${altitudeRegressionEnd}s.`;
+                    }
+                }
+            }
+        };
+
+        const dynamicYAxisPaddingPlugin = {
+            id: 'dynamicYAxisPadding',
+            afterDataLimits(chart, { scale }) {
+                if (scale.id !== 'y') return;
+
+                let dataMin = Infinity;
+                let dataMax = -Infinity;
+                chart.data.datasets.forEach(dataset => {
+                    dataset.data.forEach(value => {
+                        if (value === null || value === undefined || value === '') return;
+                        const numericValue = Number(value);
+                        if (!Number.isFinite(numericValue)) return;
+                        dataMin = Math.min(dataMin, numericValue);
+                        dataMax = Math.max(dataMax, numericValue);
+                    });
+                });
+                if (
+                    chart.canvas.id === 'chartAlt' &&
+                    altitudeRegressionStart !== null &&
+                    altitudeRegressionEnd !== null
+                ) {
+                    chart.data.datasets.forEach(dataset => {
+                        const regression = calculateLinearRegression(
+                            dataset.data,
+                            chart.data.labels,
+                            altitudeRegressionStart,
+                            altitudeRegressionEnd
+                        );
+                        if (!regression) return;
+                        dataMin = Math.min(
+                            dataMin,
+                            regression.startAltitude,
+                            regression.endAltitude
+                        );
+                        dataMax = Math.max(
+                            dataMax,
+                            regression.startAltitude,
+                            regression.endAltitude
+                        );
+                    });
+                }
+                if (dataMin === Infinity) return;
+
+                let scaleMin = dataMin - Math.abs(dataMin) * 0.6;
+                let scaleMax = dataMax + Math.abs(dataMax) * 0.6;
+
+                // Um intervalo constante em zero precisa de uma amplitude mínima válida.
+                if (scaleMin === scaleMax) {
+                    const padding = Math.max(Math.abs(dataMin) * 0.6, 1);
+                    scaleMin -= padding;
+                    scaleMax += padding;
+                }
+
+                scale.min = scaleMin;
+                scale.max = scaleMax;
+            }
+        };
+
+        function makeChart(id, label, color) {
             const ctx = document.getElementById(id).getContext('2d');
             return new Chart(ctx, {
                 type: 'line',
@@ -474,8 +736,7 @@
                             }
                         }, 
                         y: { 
-                            min: yMin,
-                            max: yMax,
+                            bounds: 'data',
                             grid: { color: '#334155' },
                             ticks: { color: '#94a3b8' } 
                         } 
@@ -486,7 +747,11 @@
                             annotations: {}
                         }
                     }
-                }
+                },
+                plugins: [
+                    dynamicYAxisPaddingPlugin,
+                    ...(id === 'chartAlt' ? [altitudeRegressionPlugin] : [])
+                ]
             });
         }
 
@@ -572,7 +837,7 @@
         
         const charts = {};
         chartConfigs.forEach(cfg => {
-            charts[cfg.id] = makeChart(cfg.id, cfg.label, cfg.color, cfg.yMin, cfg.yMax);
+            charts[cfg.id] = makeChart(cfg.id, cfg.label, cfg.color);
         });
 
         function updateKPIs(cfgId, dataArray) {
@@ -1265,7 +1530,7 @@ function updateSensorWidget(data = {}) {
 
         const readingsHtml = sensor.readings.map(reading => {
             const value = reading.key
-                ? formatTelemetryValue(data[reading.key], reading.unit, reading.decimals)
+                ? formatTelemetryValue(data[reading.key], reading.unit, 2)
                 : reading.value;
             return `<div class="sensor-reading">
                 <span class="sensor-reading-name">${reading.label}</span>

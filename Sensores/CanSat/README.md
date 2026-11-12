@@ -1,7 +1,8 @@
 # Firmware integrado dos sensores
 
-`CanSat.ino` foi preparado para a placa **ESP32-C6 Dev Module** e agenda cinco
-pacotes por segundo, um a cada 200 ms, pela porta USB serial a 115200 baud.
+`CanSat.ino` foi preparado para a placa **ESP32-C6 Dev Module**. Após ligar,
+aguarda 10 segundos antes do primeiro pacote; depois agenda cinco pacotes por
+segundo, um a cada 200 ms, pela porta USB serial a 115200 baud.
 Os valores dos sensores ficam em cache entre leituras: o BME680 atualiza a
 200 ms e o SGP30 a 1000 ms. O envio usa AES-256-GCM; a GS aceita também
 pacotes CANSAT-TLM antigos protegidos apenas por CRC. A câmara HuskyLens e a

@@ -12,6 +12,8 @@ Este repositório contém uma Ground Station para telemetria de **um ou vários 
 - Depois de a gravação automática terminar, a receção e a visualização da telemetria continuam. Em modo LIVE, **Exportar CSV** descarrega o ficheiro completo da sessão, sem o limite do histórico visual.
 - Botão **Pausar captura**: deixa de atualizar gráficos e CSV, mas continua a receber, validar e confirmar os pacotes com ACK. Os pacotes recebidos durante a pausa são descartados.
 - Históricos de voo e gráficos limitados a 2000 amostras em memória.
+- Os eixos verticais dos gráficos ajustam-se aos dados visíveis, com margem de 20% abaixo do mínimo e acima do máximo.
+- O gráfico de altitude permite calcular e mostrar regressões lineares entre dois tempos de missão escolhidos pelo utilizador.
 - Exportação do CSV completo em modo LIVE, CSV/ZIP em modo replay e gráficos PNG; modo replay a partir de CSV.
 - Transporte UDP e variante serial para APC220. A página web está separada do código do servidor em `web/index.html`.
 
@@ -91,7 +93,8 @@ Instruções de bibliotecas, pinos e teste por USB estão em
 [Sensores/CanSat/README.md](Sensores/CanSat/README.md). Os emissores antigos
 continuam aceites; os gráficos de O2 e som já estão disponíveis na GS. A
 GS também inclui um widget **Sensores** com o estado e as respetivas
-medições. O firmware agenda cinco pacotes por segundo (200 ms), cifrados com
+medições. O firmware aguarda 10 segundos após o arranque e depois agenda cinco
+pacotes por segundo (200 ms), cifrados com
 AES-256-GCM; o BME680 atualiza a 5 Hz e o SGP30 a 1 Hz, repetindo-se o último
 valor disponível entre leituras. Configura-se uma chave partilhada em
 `Sensores/CanSat/CanSatSecrets.h`, usada pela GS e pelo firmware. A GS calcula
