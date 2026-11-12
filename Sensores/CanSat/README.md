@@ -1,12 +1,11 @@
 # Firmware integrado dos sensores
 
 `CanSat.ino` foi preparado para a placa **ESP32-C6 Dev Module**. Após ligar,
-aguarda 10 segundos antes do primeiro pacote; depois agenda cinco pacotes por
-segundo, um a cada 200 ms, pela porta USB serial a 115200 baud.
+aguarda 10 segundos antes do primeiro pacote. Depois envia cinco pacotes por
+segundo pela USB serial a 115200 baud e pelo APC220 a 9600 baud.
 Os valores dos sensores ficam em cache entre leituras: o BME680 atualiza a
 200 ms e o SGP30 a 1000 ms. O envio usa AES-256-GCM; a GS aceita também
-pacotes CANSAT-TLM antigos protegidos apenas por CRC. A câmara HuskyLens e a
-ligação APC220 continuam adiadas.
+pacotes CANSAT-TLM antigos protegidos apenas por CRC.
 
 ## Chave AES-GCM
 
@@ -28,10 +27,11 @@ ligação APC220 continuam adiadas.
    firmware.
 
 O firmware não transmite telemetria se a chave estiver ausente ou inválida.
-Cada pacote usa um nonce novo e a autenticação AES-GCM; dados, nonce e tag
-aparecem codificados em Base64 no envelope serial, mas as medições ficam
-cifradas. O contador de arranques guardado na NVS impede reutilizar nonces
-após um reinício normal; não apagues a NVS mantendo a mesma chave AES.
+Cada pacote usa um nonce novo e a autenticação AES-GCM; pela USB, o nonce,
+ciphertext e tag aparecem em Base64 no envelope JSON. Pelo APC220, seguem
+como bytes no frame binário. O contador de arranques guardado na NVS impede
+reutilizar nonces após um reinício normal; não apagues a NVS mantendo a mesma
+chave AES.
 
 ## Formato compacto da telemetria
 
@@ -42,7 +42,22 @@ oxygen_percent, mag_x, mag_y, mag_z, sound_adc_sum,
 sound_adc_sum_squares, sound_sample_count]`. Uma medição indisponível aparece
 como `null`, sem deslocar as posições seguintes. O CanSat ID está no envelope
 autenticado; a GS obtém o número de sequência a partir do nonce autenticado.
-A tabela completa e os tipos estão no README principal.
+USB e APC220 mantêm sequências independentes e prefixos de nonce distintos,
+para que pacotes recebidos por ligações diferentes não reutilizem nonces.
+Pela USB, o conteúdo AES-GCM é o array JSON. Pelo APC220, a mesma telemetria
+é codificada num frame binário compacto de 99 bytes, abaixo do buffer de
+256 bytes indicado para o módulo.
+
+O frame APC220 tem esta estrutura: `C3 5A` (sincronização), versão `01`,
+CanSat ID (1 byte), nonce (12 bytes), ciphertext (67 bytes) e tag AES-GCM
+(16 bytes). O plaintext binário é little-endian: `mission_time_ms` uint32,
+estado dos sensores (1 byte; bits 0–4 para BME680, SGP30, TSL2561, HMC5883L
+e SEN0465; bits 5–6 para MAX4466 e UV configurados), 12 valores float32
+(`temperature`, `humidity`, `pressure`, `gas_resistance_kohm`, `eco2`,
+`tvoc`, `lux`, `uv_millivolts`, `oxygen_percent`, `mag_x`, `mag_y`, `mag_z`),
+`sound_adc_sum` uint32, `sound_adc_sum_squares` uint64 e
+`sound_sample_count` uint16. NaN significa uma leitura indisponível; zero
+amostras significa que as estatísticas do som não estão disponíveis.
 
 ## Bibliotecas Arduino
 
@@ -74,10 +89,45 @@ DFRobot correspondente.
 | Gravity SEN0465 O2 | I2C | SDA GPIO6, SCL GPIO7, endereço 0x74 |
 | GUVA-S12SD UV | Analógico | AOUT GPIO0 |
 | MAX4466 | Analógico | OUT GPIO1 |
+| APC220 | UART1 | ESP TX GPIO16, ESP RX GPIO17 |
 
 O GPIO1 foi escolhido para o MAX4466 para resolver a colisão com o UV no
 GPIO0. Confirma esta ligação na placa antes de alimentar o circuito. Os
 sensores I2C partilham o mesmo barramento configurado a 100 kHz.
+
+## Ligação e receção pelo APC220
+
+Liga o APC220 ao ESP32-C6 com UART cruzada:
+
+| APC220 | ESP32-C6 |
+|---|---|
+| TXD | RX GPIO17 |
+| RXD | TX GPIO16 |
+| GND | GND |
+| VCC | Alimentação especificada para a versão do teu módulo |
+
+Confirma no manual do módulo a tensão de alimentação e os níveis lógicos;
+GPIOs do ESP32-C6 são de 3,3 V e não toleram 5 V. O sketch e a GS usam UART
+a 9600 baud, 8N1; confirma/configura ambos os módulos e o dongle USB para
+essa velocidade. Usa antena adequada e configura os dois módulos com
+parâmetros RF compatíveis (canal, taxa de ar e endereço, se aplicável). A
+taxa UART não é a taxa de transmissão pelo ar.
+
+No computador, liga o segundo APC220 a um adaptador USB-UART com lógica de
+3,3 V: TXD do rádio ao RX do adaptador, RXD ao TX, e GND comum. O adaptador
+USB-UART tem de ser uma interface serial TTL; não ligues sinais UART
+diretamente aos pinos USB do computador. Fecha o Serial Monitor do Arduino
+IDE e inicia a GS no modo binário APC220:
+
+```powershell
+py -3 groundstation_serial.py --port COM8 --apc220-binary
+```
+
+O rádio transmite cinco frames binários AES-GCM de 99 bytes por segundo. O
+produto indica buffer de 256 bytes e alcance especificado a 9600 bps; o
+formato compacto cabe no buffer e reduz o débito do payload para cerca de
+4,95 kbit/s na UART a 9600 baud (8N1). O desempenho RF real depende da
+configuração dos módulos e deve ser confirmado em teste.
 
 ## Dados e limitações nesta fase
 
@@ -97,7 +147,8 @@ sensores I2C partilham o mesmo barramento configurado a 100 kHz.
 - O HMC5883L produz magnetómetro/rumo magnético; não substitui um IMU.
   Acelerómetro, giroscópio, atitude, paraquedas e métricas de rádio não são
   incluídos porque esta versão não os mede. Os sensores não encontrados são
-  indicados como `missing` em `sensor_status`; as suas leituras são omitidas.
+  indicados como `missing` em `sensor_status`; os respetivos índices levam
+  `null`.
 - O estado de voo é enviado como `SENSOR`; esta versão não implementa uma
   máquina de estados de voo.
 
@@ -123,8 +174,8 @@ sensores I2C partilham o mesmo barramento configurado a 100 kHz.
    transmitiu. Altitude, velocidade e aceleração passam a ser calculadas pela
    GS e guardadas no CSV.
 
-O agendamento usa intervalos nominais de 200 ms; o tempo do pacote regista o
-instante do slot. Se o sensor, o USB ou o processador atrasar um slot, a GS
-mantém a lacuna no tempo/na sequência em vez de inventar uma leitura. O SGP30
-continua a atualizar a 1 Hz, pelo que o seu último valor é repetido nos
-pacotes intermédios.
+O agendamento USB e APC220 usa intervalos nominais de 200 ms; o tempo do
+pacote regista o instante do slot que originou a amostra. Se o sensor, a
+serial ou o processador atrasar um slot, a GS mantém a lacuna no tempo/na
+sequência em vez de inventar uma leitura. O SGP30 continua a atualizar a 1 Hz,
+pelo que o seu último valor é repetido nos pacotes intermédios.

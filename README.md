@@ -220,7 +220,7 @@ O simulador deve ser iniciado depois da Ground Station. A janela do simulador pe
 
 `iniciar_gs.bat` usa o ambiente virtual ativo ou o `.venv` do projeto, se existir. `iniciar_simulador.bat` prepara o PATH das DLLs do MSYS2. A instalação padrão esperada é `C:\msys64`; se usares outra pasta, adiciona `ucrt64\bin` ao PATH do Windows.
 
-## Serial (USB direto ou APC220)
+## Serial USB e APC220
 
 Para ligar o ESP32 diretamente por USB, fecha primeiro o Serial Monitor do
 Arduino IDE e inicia a GS na porta COM da placa:
@@ -230,17 +230,19 @@ py -3 groundstation_serial.py --port COM5
 ```
 
 O firmware integrado usa 115200 baud por omissão. Para uma ligação APC220,
-usa a porta do adaptador USB-serial e configura o baud rate dos dois rádios
-(normalmente 9600):
+usa a porta do adaptador USB-UART do kit, baud 9600, e ativa o descodificador
+binário do APC220:
 
 ```bash
-python3 groundstation_serial.py --port /dev/ttyUSB0 --baudrate 9600
+python3 groundstation_serial.py --port /dev/ttyUSB0 --apc220-binary
 ```
 
-O protocolo serial usa uma mensagem JSON por linha, terminada em newline
-(`\n`); a ligação tem de transportar telemetria e respostas ACK. Não inicies
-simultaneamente a variante UDP e a serial, pois ambas usam as mesmas portas
-Web e WebSocket.
+Pela USB direta, a GS recebe linhas JSON a 115200 baud. Pelo APC220, o
+firmware transmite frames binários AES-GCM de 99 bytes a 9600 baud e 5 Hz; a
+opção `--apc220-binary` sincroniza e descodifica esses frames. O rádio e o
+adaptador USB-UART têm de estar configurados para parâmetros compatíveis.
+Não inicies simultaneamente a variante UDP e a serial, pois ambas usam as
+mesmas portas Web e WebSocket.
 
 ## Captura, dados e encerramento
 

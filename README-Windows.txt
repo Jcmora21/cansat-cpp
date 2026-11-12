@@ -106,11 +106,10 @@ Para controlo manual, tambem podes iniciar a GS com:
   continua; "Exportar CSV" em modo LIVE guarda o CSV completo da sessao.
 
 Para usar APC220, liga o adaptador USB-serial e indica a porta COM e o
-baudrate configurado nos modulos, por exemplo:
-  py -3 groundstation_serial.py --port COM3 --baudrate 9600
-As mensagens, incluindo ACKs, sao objetos JSON terminados em newline.
-Nao inicies a GS UDP e a serial ao mesmo tempo: partilham as portas
-do painel Web e do WebSocket.
+inicia o descodificador binario (9600 baud por omissao), por exemplo:
+  py -3 groundstation_serial.py --port COM8 --apc220-binary
+Configura os dois modulos com parametros RF compativeis. Nao inicies a GS UDP
+e a serial ao mesmo tempo: partilham as portas do painel Web e do WebSocket.
 
 --------------------------------------------------------------------
 5. COMO PARAR A EXECUCAO

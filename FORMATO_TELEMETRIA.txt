@@ -20,3 +20,23 @@ O firmware AES-GCM cifra uma lista posicional fixa, sem nomes de campos. O envel
 
 Leituras indisponíveis são `null` e mantêm o lugar. Exemplo ilustrativo do conteúdo cifrado antes da encriptação:
 [1000,"bme680=ok;sgp30=ok;tsl2561=ok;hmc5883l=ok;sen0465=ok;max4466=configured;uv=configured",25.26,55.0,1006.72,54.2,400,10,438.0,280.0,20.9,39.4,0.3,43.3,204800,850000000,500]
+
+Pela USB, o firmware cifra este array JSON num envelope JSON AES-256-GCM.
+Pelo APC220, usa um frame binário fixo de 99 bytes:
+
+offset  tamanho  significado
+0       2        magic C3 5A
+2       1        versão do frame (1)
+3       1        cansat_id
+4       12       nonce AES-GCM
+16      67       ciphertext
+83      16       tag AES-GCM
+
+O plaintext binário cifrado é little-endian e tem 67 bytes:
+uint32 mission_time_ms, uint8 sensor_status_mask, 12 x float32
+(temperature, humidity, pressure, gas_resistance_kohm, eco2, tvoc, lux,
+uv_millivolts, oxygen_percent, mag_x, mag_y, mag_z), uint32 sound_adc_sum,
+uint64 sound_adc_sum_squares e uint16 sound_sample_count. Bits 0–4 da máscara
+indicam BME680, SGP30, TSL2561, HMC5883L e SEN0465 disponíveis; bits 5–6
+indicam MAX4466 e UV configurados. NaN representa leitura indisponível.
+Nonce e tag autenticam o payload AES-GCM; o ID é autenticado como AAD.

@@ -1,6 +1,6 @@
 /*
   CanSat sensor integration for ESP32-C6 Dev Module.
-  USB serial outputs five AES-GCM encrypted sensor packets per second.
+  USB serial and APC220 output five AES-GCM packets per second.
 */
 
 #include <Wire.h>
@@ -30,6 +30,8 @@ constexpr uint8_t SDA_PIN = 6;
 constexpr uint8_t SCL_PIN = 7;
 constexpr uint8_t UV_PIN = 0;
 constexpr uint8_t MIC_PIN = 1;
+constexpr uint8_t APC220_TX_PIN = 16;
+constexpr uint8_t APC220_RX_PIN = 17;
 
 constexpr uint8_t BME_SCK = 18;
 constexpr uint8_t BME_MOSI = 19;
@@ -41,12 +43,19 @@ constexpr uint32_t BME680_INTERVAL_MS = 200;
 constexpr uint32_t SGP30_INTERVAL_MS = 1000;
 constexpr uint32_t TELEMETRY_START_DELAY_MS = 10000;
 constexpr uint32_t TELEMETRY_INTERVAL_MS = 200;
+constexpr uint32_t APC220_BAUD_RATE = 9600;
+constexpr uint32_t APC220_INTERVAL_MS = TELEMETRY_INTERVAL_MS;
 constexpr uint32_t AUXILIARY_SENSOR_INTERVAL_MS = 200;
 constexpr uint16_t MIC_SAMPLE_COUNT = 500;
 constexpr uint16_t MIC_SAMPLE_INTERVAL_US = 200;
 constexpr size_t AES_KEY_SIZE = 32;
 constexpr size_t AES_GCM_NONCE_SIZE = 12;
 constexpr size_t AES_GCM_TAG_SIZE = 16;
+constexpr size_t APC220_HEADER_SIZE = 4;
+constexpr size_t APC220_BINARY_PAYLOAD_SIZE = 67;
+constexpr size_t APC220_FRAME_SIZE =
+    APC220_HEADER_SIZE + AES_GCM_NONCE_SIZE + APC220_BINARY_PAYLOAD_SIZE +
+    AES_GCM_TAG_SIZE;
 constexpr size_t MAX_TELEMETRY_JSON_SIZE = 2048;
 constexpr size_t MAX_TELEMETRY_BASE64_SIZE =
     ((MAX_TELEMETRY_JSON_SIZE + 2) / 3) * 4 + 1;
@@ -64,8 +73,10 @@ bool tslAvailable = false;
 bool magnetometerAvailable = false;
 bool oxygenAvailable = false;
 bool bmeReadingPending = false;
-uint32_t sequenceNumber = 0;  // Identifica pacotes e completa lacunas de envio.
+uint32_t usbSequenceNumber = 0;
+uint32_t apc220SequenceNumber = 0;
 uint32_t nextTelemetryTime = 0;
+uint32_t nextApc220TelemetryTime = 0;
 uint32_t previousBmeStartTime = 0;
 uint32_t previousSgp30Time = 0;
 uint32_t previousAuxiliarySensorTime = 0;
@@ -119,6 +130,59 @@ void addNullable(JsonArray values, float value) {
   }
 }
 
+// Acrescenta um inteiro em little-endian ao payload binário do APC220.
+void appendLittleEndian(uint8_t *output, size_t &offset, uint64_t value,
+                        size_t byteCount) {
+  for (size_t byte = 0; byte < byteCount; ++byte) {
+    output[offset++] = static_cast<uint8_t>(value >> (byte * 8));
+  }
+}
+
+// Codifica float32 IEEE-754 em little-endian, usando NaN para leituras ausentes.
+void appendFloat32(uint8_t *output, size_t &offset, float value) {
+  static_assert(sizeof(float) == sizeof(uint32_t),
+                "APC220 binary telemetry requires 32-bit floats.");
+  uint32_t bits = 0;
+  memcpy(&bits, &value, sizeof(bits));
+  appendLittleEndian(output, offset, bits, sizeof(bits));
+}
+
+// Serializa as leituras medidas em 67 bytes, sem nomes de campos nem Base64.
+size_t encodeApc220Telemetry(const TelemetrySample &sample, uint32_t now,
+                             uint8_t *output) {
+  size_t offset = 0;
+  appendLittleEndian(output, offset, now, sizeof(now));
+
+  uint8_t status = 0;
+  status |= bmeAvailable ? 1U << 0 : 0;
+  status |= sgpAvailable ? 1U << 1 : 0;
+  status |= tslAvailable ? 1U << 2 : 0;
+  status |= magnetometerAvailable ? 1U << 3 : 0;
+  status |= oxygenAvailable ? 1U << 4 : 0;
+  status |= 1U << 5;
+  status |= 1U << 6;
+  output[offset++] = status;
+
+  const float measurements[] = {
+      sample.temperature,       sample.humidity, sample.pressure,
+      sample.gasResistanceKohm, sample.eco2,     sample.tvoc,
+      sample.lux,               sample.uvMillivolts,
+      sample.oxygenPercent,     sample.magX,     sample.magY,
+      sample.magZ,
+  };
+  for (float measurement : measurements) {
+    appendFloat32(output, offset, measurement);
+  }
+
+  appendLittleEndian(output, offset, sample.soundAdcSum,
+                     sizeof(sample.soundAdcSum));
+  appendLittleEndian(output, offset, sample.soundAdcSumSquares,
+                     sizeof(sample.soundAdcSumSquares));
+  appendLittleEndian(output, offset, sample.soundSampleCount,
+                     sizeof(sample.soundSampleCount));
+  return offset;
+}
+
 // Converte um carácter hexadecimal num nibble; -1 indica carácter inválido.
 int hexDigit(char value) {
   if (value >= '0' && value <= '9') return value - '0';
@@ -141,7 +205,7 @@ bool initializeEncryption() {
   if (!noncePreferences.begin("cansat", false)) return false;
   const uint64_t previousBootCounter =
       noncePreferences.getULong64("boot", 0);
-  if (previousBootCounter == UINT64_MAX) {
+  if (previousBootCounter >= (UINT64_MAX >> 1)) {
     noncePreferences.end();
     return false;
   }
@@ -313,12 +377,99 @@ void updateMicrophone(TelemetrySample &sample, uint32_t nowMicros) {
   micSampleCount = 0;
 }
 
-// Monta uma lista posicional de telemetria, cifra-a e escreve o envelope pela USB.
-void sendTelemetry(const TelemetrySample &sample, uint32_t now) {
-  telemetryPacket.clear();
-  // Cada transmissão consome uma sequência; slots perdidos também são contados no loop.
-  const uint32_t sequence = sequenceNumber++;
+// Cifra um payload com nonce separado por ligação e transmite-o no respetivo formato.
+void sendEncryptedTelemetry(const uint8_t *plaintext, size_t plaintextLength,
+                            uint32_t sequence, bool apc220) {
+  uint8_t nonce[AES_GCM_NONCE_SIZE];
+  const uint64_t nonceBootCounter = (bootCounter << 1) | (apc220 ? 1ULL : 0ULL);
+  for (uint8_t index = 0; index < 8; ++index) {
+    nonce[index] =
+        static_cast<uint8_t>(nonceBootCounter >> (56 - index * 8));
+  }
+  nonce[8] = static_cast<uint8_t>(sequence >> 24);
+  nonce[9] = static_cast<uint8_t>(sequence >> 16);
+  nonce[10] = static_cast<uint8_t>(sequence >> 8);
+  nonce[11] = static_cast<uint8_t>(sequence);
 
+  // AAD não é cifrada, mas fica autenticada para vincular protocolo, versão e CanSat.
+  char additionalData[40];
+  const int aadLength = snprintf(additionalData, sizeof(additionalData),
+                                "CANSAT-TLM-ENC|1|%u",
+                                static_cast<unsigned>(CANSAT_ID));
+  uint8_t tag[AES_GCM_TAG_SIZE];
+  if (aadLength <= 0 ||
+      mbedtls_gcm_crypt_and_tag(
+          &aesGcm, MBEDTLS_GCM_ENCRYPT, plaintextLength, nonce, sizeof(nonce),
+          reinterpret_cast<const uint8_t *>(additionalData), aadLength,
+          plaintext,
+          encryptedTelemetry, sizeof(tag), tag) != 0) {
+    Serial.println("{\"type\":\"telemetry_error\",\"error\":\"encryption_failed\"}");
+    return;
+  }
+
+  if (apc220) {
+    if (plaintextLength != APC220_BINARY_PAYLOAD_SIZE) {
+      Serial.println("{\"type\":\"telemetry_error\",\"error\":\"binary_size\"}");
+      return;
+    }
+    uint8_t frame[APC220_FRAME_SIZE];
+    frame[0] = 0xC3;
+    frame[1] = 0x5A;
+    frame[2] = 1;
+    frame[3] = CANSAT_ID;
+    memcpy(frame + APC220_HEADER_SIZE, nonce, sizeof(nonce));
+    memcpy(frame + APC220_HEADER_SIZE + sizeof(nonce), encryptedTelemetry,
+           plaintextLength);
+    memcpy(frame + APC220_HEADER_SIZE + sizeof(nonce) + plaintextLength, tag,
+           sizeof(tag));
+    Serial1.write(frame, sizeof(frame));
+    return;
+  }
+
+  size_t ciphertextLength = 0;
+  if (mbedtls_base64_encode(
+          reinterpret_cast<unsigned char *>(encryptedTelemetryBase64),
+          sizeof(encryptedTelemetryBase64), &ciphertextLength,
+          encryptedTelemetry, plaintextLength) != 0) {
+    Serial.println("{\"type\":\"telemetry_error\",\"error\":\"encoding_failed\"}");
+    return;
+  }
+
+  char nonceBase64[17];
+  char tagBase64[25];
+  size_t nonceLength = 0;
+  size_t tagLength = 0;
+  if (mbedtls_base64_encode(
+          reinterpret_cast<unsigned char *>(nonceBase64), sizeof(nonceBase64),
+          &nonceLength, nonce, sizeof(nonce)) != 0 ||
+      mbedtls_base64_encode(
+          reinterpret_cast<unsigned char *>(tagBase64), sizeof(tagBase64),
+          &tagLength, tag, sizeof(tag)) != 0) {
+    Serial.println("{\"type\":\"telemetry_error\",\"error\":\"encoding_failed\"}");
+    return;
+  }
+
+  encryptedEnvelope.clear();
+  JsonDocument &envelope = encryptedEnvelope;
+  envelope["cansat_id"] = CANSAT_ID;
+  envelope["ciphertext"] = encryptedTelemetryBase64;
+  envelope["nonce"] = nonceBase64;
+  envelope["protocol"] = "CANSAT-TLM-ENC";
+  envelope["tag"] = tagBase64;
+  envelope["type"] = "encrypted_telemetry";
+  envelope["version"] = 1;
+  if (encryptedEnvelope.overflowed()) {
+    Serial.println("{\"type\":\"telemetry_error\",\"error\":\"envelope_overflow\"}");
+    return;
+  }
+  serializeJson(envelope, Serial);
+  Serial.println();
+}
+
+// Cria a lista posicional e envia pela USB; envia também pelo APC220 quando devido.
+void sendTelemetry(const TelemetrySample &sample, uint32_t now,
+                   bool sendApc220) {
+  telemetryPacket.clear();
   // Ordem fixa: tempo, estado dos sensores, temperatura, humidade, pressão,
   // resistência do gás, eCO2, TVOC, lux, tensão UV, O2, mag X/Y/Z,
   // soma ADC, soma dos quadrados ADC e quantidade de amostras do microfone.
@@ -357,75 +508,26 @@ void sendTelemetry(const TelemetrySample &sample, uint32_t now) {
     return;
   }
 
-  // Nonce único por chave: contador de arranques persistido + sequência do pacote.
-  uint8_t nonce[AES_GCM_NONCE_SIZE];
-  for (uint8_t index = 0; index < 8; ++index) {
-    nonce[index] = static_cast<uint8_t>(bootCounter >> (56 - index * 8));
+  sendEncryptedTelemetry(
+      reinterpret_cast<const uint8_t *>(telemetryJson), jsonLength,
+      usbSequenceNumber++, false);
+  if (sendApc220) {
+    uint8_t binaryTelemetry[APC220_BINARY_PAYLOAD_SIZE];
+    const size_t binaryLength =
+        encodeApc220Telemetry(sample, now, binaryTelemetry);
+    if (binaryLength != sizeof(binaryTelemetry)) {
+      Serial.println("{\"type\":\"telemetry_error\",\"error\":\"binary_size\"}");
+      return;
+    }
+    sendEncryptedTelemetry(binaryTelemetry, binaryLength,
+                           apc220SequenceNumber++, true);
   }
-  nonce[8] = static_cast<uint8_t>(sequence >> 24);
-  nonce[9] = static_cast<uint8_t>(sequence >> 16);
-  nonce[10] = static_cast<uint8_t>(sequence >> 8);
-  nonce[11] = static_cast<uint8_t>(sequence);
-
-  // AAD não é cifrada, mas fica autenticada para vincular protocolo, versão e CanSat.
-  char additionalData[40];
-  const int aadLength = snprintf(additionalData, sizeof(additionalData),
-                                "CANSAT-TLM-ENC|1|%u",
-                                static_cast<unsigned>(CANSAT_ID));
-  uint8_t tag[AES_GCM_TAG_SIZE];
-  if (aadLength <= 0 ||
-      mbedtls_gcm_crypt_and_tag(
-          &aesGcm, MBEDTLS_GCM_ENCRYPT, jsonLength, nonce, sizeof(nonce),
-          reinterpret_cast<const uint8_t *>(additionalData), aadLength,
-          reinterpret_cast<const uint8_t *>(telemetryJson),
-          encryptedTelemetry, sizeof(tag), tag) != 0) {
-    Serial.println("{\"type\":\"telemetry_error\",\"error\":\"encryption_failed\"}");
-    return;
-  }
-
-  size_t ciphertextLength = 0;
-  if (mbedtls_base64_encode(
-          reinterpret_cast<unsigned char *>(encryptedTelemetryBase64),
-          sizeof(encryptedTelemetryBase64), &ciphertextLength,
-          encryptedTelemetry, jsonLength) != 0) {
-    Serial.println("{\"type\":\"telemetry_error\",\"error\":\"encoding_failed\"}");
-    return;
-  }
-
-  char nonceBase64[17];
-  char tagBase64[25];
-  size_t nonceLength = 0;
-  size_t tagLength = 0;
-  if (mbedtls_base64_encode(
-          reinterpret_cast<unsigned char *>(nonceBase64), sizeof(nonceBase64),
-          &nonceLength, nonce, sizeof(nonce)) != 0 ||
-      mbedtls_base64_encode(
-          reinterpret_cast<unsigned char *>(tagBase64), sizeof(tagBase64),
-          &tagLength, tag, sizeof(tag)) != 0) {
-    Serial.println("{\"type\":\"telemetry_error\",\"error\":\"encoding_failed\"}");
-    return;
-  }
-
-  encryptedEnvelope.clear();
-  JsonDocument &envelope = encryptedEnvelope;
-  envelope["cansat_id"] = CANSAT_ID;
-  envelope["ciphertext"] = encryptedTelemetryBase64;
-  envelope["nonce"] = nonceBase64;
-  envelope["protocol"] = "CANSAT-TLM-ENC";
-  envelope["tag"] = tagBase64;
-  envelope["type"] = "encrypted_telemetry";
-  envelope["version"] = 1;
-  if (encryptedEnvelope.overflowed()) {
-    Serial.println("{\"type\":\"telemetry_error\",\"error\":\"envelope_overflow\"}");
-    return;
-  }
-  serializeJson(envelope, Serial);
-  Serial.println();
 }
 
 // Arranque: configura a serial, valida AES e inicializa sensores e temporizadores.
 void setup() {
   Serial.begin(115200);
+  Serial1.begin(APC220_BAUD_RATE, SERIAL_8N1, APC220_RX_PIN, APC220_TX_PIN);
   if (!initializeEncryption()) {
     Serial.println("{\"type\":\"telemetry_error\",\"error\":\"invalid_aes_key\"}");
     return;
@@ -438,6 +540,7 @@ void setup() {
   previousAuxiliarySensorTime = now - AUXILIARY_SENSOR_INTERVAL_MS;
   // Dá 10 s para estabilização antes do primeiro pacote; depois mantém slots de 200 ms.
   nextTelemetryTime = now + TELEMETRY_START_DELAY_MS;
+  nextApc220TelemetryTime = nextTelemetryTime;
   nextUvSampleTime = now;
   nextMicSampleTime = micros();
 }
@@ -464,13 +567,22 @@ void loop() {
 
   const uint32_t telemetryNow = millis();
   if (static_cast<int32_t>(telemetryNow - nextTelemetryTime) >= 0) {
-    sendTelemetry(latestTelemetrySample, nextTelemetryTime);
+    const bool sendApc220 =
+        static_cast<int32_t>(telemetryNow - nextApc220TelemetryTime) >= 0;
+    sendTelemetry(latestTelemetrySample, nextTelemetryTime, sendApc220);
     nextTelemetryTime += TELEMETRY_INTERVAL_MS;
     const uint32_t afterSend = millis();
+    if (sendApc220) {
+      nextApc220TelemetryTime += APC220_INTERVAL_MS;
+    }
     // Se o processamento atrasou, salta slots e avança o contador sem enviar em rajada.
     while (static_cast<int32_t>(afterSend - nextTelemetryTime) >= 0) {
-      ++sequenceNumber;
+      ++usbSequenceNumber;
       nextTelemetryTime += TELEMETRY_INTERVAL_MS;
+    }
+    while (static_cast<int32_t>(afterSend - nextApc220TelemetryTime) >= 0) {
+      ++apc220SequenceNumber;
+      nextApc220TelemetryTime += APC220_INTERVAL_MS;
     }
   }
   delayMicroseconds(20);

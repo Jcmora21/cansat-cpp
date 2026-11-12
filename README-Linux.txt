@@ -101,10 +101,11 @@ Abre um segundo terminal e executa:
   por isso o repositorio pode estar instalado em qualquer local.
 
 Para usar APC220, liga a porta USB-serial e executa, por exemplo:
-  python3 groundstation_serial.py --port /dev/ttyUSB0 --baudrate 9600
-Indica a porta e o baudrate do teu adaptador. As mensagens, incluindo ACKs,
-sao objetos JSON terminados em newline. Nao arranques em simultaneo a GS
-UDP e a serial, pois partilham as portas do painel e do WebSocket.
+  python3 groundstation_serial.py --port /dev/ttyUSB0 --apc220-binary
+O modo binario usa 9600 baud por omissao para frames compactos AES-GCM.
+Configura os dois modulos com parametros RF compativeis. Nao arranques em
+simultaneo a GS UDP e a serial, pois partilham as portas do painel e do
+WebSocket.
 
 --------------------------------------------------------------------
 5. COMO PARAR A EXECUCAO

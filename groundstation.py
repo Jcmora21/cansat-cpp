@@ -11,6 +11,7 @@ import os
 import math
 import re
 import sys
+import struct
 import zlib
 from collections import deque
 from datetime import datetime
@@ -87,6 +88,7 @@ AES_KEY_PATH = os.path.join(
     "CanSat",
     "CanSatSecrets.h",
 )
+APC220_BINARY_TELEMETRY = struct.Struct("<IB12fIQH")
 aes_telemetry_key = None
 aes_key_checked = False
 aes_key_error_logged = False
@@ -388,12 +390,17 @@ def load_telemetry_aes_key():
 
 
 def decrypt_encrypted_telemetry(envelope):
-    """Autentica o envelope e converte a lista posicional para o formato interno."""
+    """Autentica telemetria cifrada JSON ou binária e converte-a para uso interno."""
     global aes_key_error_logged
+    packet_type = envelope.get("type")
+    is_binary_packet = packet_type == "encrypted_telemetry_binary"
     if (
         envelope.get("protocol") != "CANSAT-TLM-ENC"
         or envelope.get("version") != 1
-        or envelope.get("type") != "encrypted_telemetry"
+        or packet_type not in (
+            "encrypted_telemetry",
+            "encrypted_telemetry_binary",
+        )
         or type(envelope.get("cansat_id")) is not int
         or envelope["cansat_id"] < 0
     ):
@@ -415,10 +422,12 @@ def decrypt_encrypted_telemetry(envelope):
         plaintext = AESGCM(key).decrypt(
             nonce, ciphertext + tag, additional_data
         )
-        packet = json.loads(
-            plaintext.decode("utf-8"),
-            parse_constant=reject_nonstandard_json_constant,
-        )
+        packet = None
+        if not is_binary_packet:
+            packet = json.loads(
+                plaintext.decode("utf-8"),
+                parse_constant=reject_nonstandard_json_constant,
+            )
     except (KeyError, TypeError, ValueError, UnicodeDecodeError,
             json.JSONDecodeError, InvalidTag) as error:
         if not aes_key_error_logged:
@@ -428,6 +437,95 @@ def decrypt_encrypted_telemetry(envelope):
             )
             aes_key_error_logged = True
         return None
+
+    if is_binary_packet:
+        if len(plaintext) != APC220_BINARY_TELEMETRY.size:
+            if not aes_key_error_logged:
+                print("[AES-GCM] Pacote APC220 descartado: tamanho binário inválido.")
+                aes_key_error_logged = True
+            return None
+
+        values = APC220_BINARY_TELEMETRY.unpack(plaintext)
+        mission_time_ms, sensor_status_mask = values[:2]
+        measurements = values[2:14]
+        sound_adc_sum, sound_adc_sum_squares, sound_sample_count = values[14:]
+        if sensor_status_mask & ~0x7F:
+            if not aes_key_error_logged:
+                print("[AES-GCM] Pacote APC220 descartado: estado de sensor inválido.")
+                aes_key_error_logged = True
+            return None
+        if any(math.isinf(value) for value in measurements):
+            if not aes_key_error_logged:
+                print("[AES-GCM] Pacote APC220 descartado: medição infinita.")
+                aes_key_error_logged = True
+            return None
+        if (
+            sound_sample_count > 500
+            or (
+                sound_sample_count == 0
+                and (sound_adc_sum != 0 or sound_adc_sum_squares != 0)
+            )
+        ):
+            if not aes_key_error_logged:
+                print("[AES-GCM] Pacote APC220 descartado: estatísticas de som inválidas.")
+                aes_key_error_logged = True
+            return None
+
+        sensor_names = (
+            "bme680",
+            "sgp30",
+            "tsl2561",
+            "hmc5883l",
+            "sen0465",
+            "max4466",
+            "uv",
+        )
+        sensor_status_values = [
+            "ok" if sensor_status_mask & (1 << index) else "missing"
+            for index in range(5)
+        ]
+        sensor_status_values.extend(
+            "configured" if sensor_status_mask & (1 << index) else "missing"
+            for index in (5, 6)
+        )
+        sensor_status = ";".join(
+            f"{name}={value}"
+            for name, value in zip(sensor_names, sensor_status_values)
+        )
+        compact_data_fields = (
+            "temperature",
+            "humidity",
+            "pressure",
+            "gas_resistance_kohm",
+            "eco2",
+            "tvoc",
+            "lux",
+            "uv_millivolts",
+            "oxygen_percent",
+            "mag_x",
+            "mag_y",
+            "mag_z",
+        )
+        data = {"sensor_status": sensor_status}
+        for field, value in zip(compact_data_fields, measurements):
+            if not math.isnan(value):
+                data[field] = value
+        if sound_sample_count:
+            data["sound_adc_sum"] = sound_adc_sum
+            data["sound_adc_sum_squares"] = sound_adc_sum_squares
+            data["sound_sample_count"] = sound_sample_count
+
+        return {
+            "protocol": "CANSAT-TLM",
+            "version": 1,
+            "type": "telemetry",
+            "cansat_id": envelope["cansat_id"],
+            "sequence": int.from_bytes(nonce[8:], "big"),
+            "mission_time_ms": mission_time_ms,
+            "state": "SENSOR",
+            "data": data,
+            "link": {},
+        }
 
     if isinstance(packet, dict):
         if (
@@ -992,7 +1090,10 @@ def transport_receiver(transport_factory=UDPTransport):
             )
             continue
 
-        is_encrypted_packet = packet.get("type") == "encrypted_telemetry"
+        is_encrypted_packet = packet.get("type") in (
+            "encrypted_telemetry",
+            "encrypted_telemetry_binary",
+        )
         if is_encrypted_packet:
             packet = decrypt_encrypted_telemetry(packet)
             if packet is None:
