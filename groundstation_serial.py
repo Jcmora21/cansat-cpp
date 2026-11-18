@@ -9,7 +9,8 @@ import serial
 from groundstation import main
 
 APC220_FRAME_MAGIC = b"\xC3\x5A"
-APC220_FRAME_SIZE = 4 + 12 + 67 + 16
+APC220_FRAME_V1_SIZE = 4 + 12 + 67 + 16
+APC220_FRAME_V2_SIZE = 4 + 12 + 69 + 16
 
 
 class SerialTransport:
@@ -54,20 +55,37 @@ class APC220BinaryTransport(SerialTransport):
                     self.buffer.clear()
             elif frame_start:
                 del self.buffer[:frame_start]
-            if len(self.buffer) >= APC220_FRAME_SIZE:
-                frame = bytes(self.buffer[:APC220_FRAME_SIZE])
-                if frame[2] != 1:
+            if len(self.buffer) >= 3:
+                frame_version = self.buffer[2]
+                frame_size = {
+                    1: APC220_FRAME_V1_SIZE,
+                    2: APC220_FRAME_V2_SIZE,
+                }.get(frame_version)
+                if frame_size is None:
                     del self.buffer[0]
                     continue
-                del self.buffer[:APC220_FRAME_SIZE]
+                if len(self.buffer) < frame_size:
+                    incoming = self.serial.read(
+                        max(1, self.serial.in_waiting)
+                    )
+                    if incoming:
+                        self.buffer.extend(incoming)
+                    continue
+                frame = bytes(self.buffer[:frame_size])
+                del self.buffer[:frame_size]
 
                 nonce_start = 4
                 ciphertext_start = nonce_start + 12
-                tag_start = ciphertext_start + 67
+                ciphertext_size = 69 if frame_version == 2 else 67
+                tag_start = ciphertext_start + ciphertext_size
                 envelope = {
                     "protocol": "CANSAT-TLM-ENC",
                     "version": 1,
-                    "type": "encrypted_telemetry_binary",
+                    "type": (
+                        "encrypted_telemetry_binary_v2"
+                        if frame_version == 2
+                        else "encrypted_telemetry_binary"
+                    ),
                     "cansat_id": frame[3],
                     "nonce": base64.b64encode(
                         frame[nonce_start:ciphertext_start]

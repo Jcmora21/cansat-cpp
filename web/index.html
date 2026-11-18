@@ -127,6 +127,8 @@
         .hab-note { font-size: 0.75em; color: #64748b; margin-top: 10px; line-height: 1.4; }
         .btn-sensors { background: #2563eb; color: white; }
         .btn-sensors.open { background: #1d4ed8; }
+        .btn-huskylens { background: #7c3aed; color: white; }
+        .btn-huskylens:hover { background: #6d28d9; }
         .sensor-panel { display: none; background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
         .sensor-panel.open { display: block; }
         .sensor-panel-head { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
@@ -146,6 +148,17 @@
         .sensor-reading { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; border-top: 1px solid #1e293b; font-size: 0.78em; }
         .sensor-reading-name { color: #94a3b8; }
         .sensor-reading-value { color: #38bdf8; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+        .husky-dictionary-box { max-width: 640px; text-align: left; }
+        .husky-dictionary-form { display: grid; grid-template-columns: 110px 1fr auto; gap: 8px; margin: 16px 0; }
+        .husky-dictionary-form input { min-width: 0; background: #0f172a; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px; padding: 8px; }
+        .husky-dictionary-list { max-height: 300px; overflow-y: auto; margin: 12px 0; }
+        .husky-dictionary-row { display: grid; grid-template-columns: 80px 1fr auto; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid #334155; }
+        .husky-dictionary-description { overflow-wrap: anywhere; color: #cbd5e1; }
+        .husky-dictionary-note { color: #94a3b8; font-size: 0.8em; line-height: 1.4; }
+        @media (max-width: 600px) {
+            .husky-dictionary-form { grid-template-columns: 1fr; }
+            .husky-dictionary-row { grid-template-columns: 55px 1fr auto; }
+        }
     </style>
 </head>
 <body>
@@ -157,6 +170,7 @@
             <button class="btn btn-mode" id="btnReplay" onclick="setMode('replay')">▶️ REPLAY</button>
             <button class="btn btn-hab" id="btnHab" onclick="toggleHabPanel()">🌍 vs Terra</button>
             <button class="btn btn-sensors" id="btnSensors" onclick="toggleSensorPanel()">🧪 Sensores</button>
+            <button class="btn btn-huskylens" onclick="openHuskyLensDictionary()">📚 Dicionário HuskyLens</button>
             <button class="btn btn-export" onclick="downloadCSV()">📥 Exportar CSV</button>
             <button class="btn btn-img" onclick="downloadChartsAsImages()">📸 Baixar Gráficos (PNG)</button>
             <button class="btn btn-cancel" id="btnCapture" onclick="toggleCapture()">⏸️ Pausar captura</button>
@@ -268,6 +282,34 @@
             <div class="sensor-legend">Verde = leituras disponíveis · Amarelo = parcial / não integrado · Vermelho = sem leitura ou não detetado</div>
         </div>
         <div class="sensor-grid" id="sensorGrid"></div>
+    </div>
+
+    <div id="huskyLensDictionaryModal" class="modal-overlay" aria-hidden="true">
+        <section class="modal-box husky-dictionary-box" role="dialog" aria-modal="true"
+                 aria-labelledby="huskyDictionaryTitle">
+            <h2 class="modal-title" id="huskyDictionaryTitle">Dicionário de IDs HuskyLens</h2>
+            <p class="husky-dictionary-note">
+                Associa cada ID aprendido na HuskyLens ao objeto correspondente. As descrições
+                ficam guardadas neste navegador e não são transmitidas pelo APC220.
+            </p>
+            <form class="husky-dictionary-form" onsubmit="saveHuskyLensDictionaryEntry(event)">
+                <label style="display:flex;flex-direction:column;gap:4px;color:#cbd5e1;font-size:0.85em;">
+                    ID (1–32767)
+                    <input id="huskyDictionaryId" type="number" min="1" max="32767" step="1"
+                           required>
+                </label>
+                <label style="display:flex;flex-direction:column;gap:4px;color:#cbd5e1;font-size:0.85em;">
+                    O que significa
+                    <input id="huskyDictionaryMeaning" type="text" required>
+                </label>
+                <button class="btn btn-export" type="submit">Guardar ID</button>
+            </form>
+            <div id="huskyDictionaryStatus" class="husky-dictionary-note" role="status"></div>
+            <div id="huskyDictionaryList" class="husky-dictionary-list"></div>
+            <div class="modal-buttons">
+                <button class="btn btn-cancel" type="button" onclick="closeHuskyLensDictionary()">Fechar</button>
+            </div>
+        </section>
     </div>
 
     <!-- ========== FASE 4: Barra de Replay ========== -->
@@ -398,6 +440,10 @@
 
         let rawDataLog = [];
         let captureEnabled = true;
+        const huskyLensDictionaryStorageKey = 'cansat-huskylens-id-dictionary';
+        let huskyLensDictionaryWarning = '';
+        let huskyLensDictionary = loadHuskyLensDictionary();
+        let latestSensorWidgetData = {};
         const maxClientHistory = 2000;
         let currentState = null;
         let lastPhaseTime = -999; 
@@ -1001,6 +1047,153 @@
             btn.classList.toggle('open', open);
         }
 
+        function loadHuskyLensDictionary() {
+            try {
+                const stored = localStorage.getItem(huskyLensDictionaryStorageKey);
+                if (stored === null) return {};
+                const parsed = JSON.parse(stored);
+                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                    throw new TypeError('formato de dicionário inválido');
+                }
+
+                const dictionary = {};
+                for (const [rawId, rawMeaning] of Object.entries(parsed)) {
+                    const id = Number(rawId);
+                    if (Number.isInteger(id) && id >= 1 && id <= 32767 &&
+                        typeof rawMeaning === 'string' && rawMeaning.trim()) {
+                        dictionary[id] = rawMeaning.trim();
+                    }
+                }
+                return dictionary;
+            } catch (error) {
+                console.error('Não foi possível carregar o dicionário HuskyLens:', error);
+                huskyLensDictionaryWarning =
+                    'Não foi possível carregar o dicionário guardado neste navegador.';
+                return {};
+            }
+        }
+
+        function saveHuskyLensDictionary() {
+            try {
+                localStorage.setItem(
+                    huskyLensDictionaryStorageKey,
+                    JSON.stringify(huskyLensDictionary)
+                );
+                huskyLensDictionaryWarning = '';
+                return true;
+            } catch (error) {
+                console.error('Não foi possível guardar o dicionário HuskyLens:', error);
+                huskyLensDictionaryWarning =
+                    'Não foi possível guardar no navegador; as alterações duram apenas esta sessão.';
+                return false;
+            }
+        }
+
+        function escapeHtml(value) {
+            return String(value).replace(/[&<>"']/g, character => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            })[character]);
+        }
+
+        function formatHuskyLensId(value) {
+            if (value === undefined) return undefined;
+            const id = Number(value);
+            if (value === null || !Number.isInteger(id) || id < 1 || id > 32767) {
+                return 'Sem ID reconhecido';
+            }
+            const meaning = huskyLensDictionary[id];
+            return meaning
+                ? `ID ${id}: ${escapeHtml(meaning)}`
+                : `ID ${id} (sem descrição)`;
+        }
+
+        function renderHuskyLensDictionary() {
+            const list = document.getElementById('huskyDictionaryList');
+            list.replaceChildren();
+            const entries = Object.entries(huskyLensDictionary)
+                .sort((left, right) => Number(left[0]) - Number(right[0]));
+
+            if (!entries.length) {
+                const empty = document.createElement('p');
+                empty.className = 'husky-dictionary-note';
+                empty.textContent = 'Ainda não foram adicionados IDs.';
+                list.appendChild(empty);
+            }
+
+            for (const [id, meaning] of entries) {
+                const row = document.createElement('div');
+                row.className = 'husky-dictionary-row';
+                const idLabel = document.createElement('strong');
+                idLabel.textContent = `ID ${id}`;
+                const meaningLabel = document.createElement('span');
+                meaningLabel.className = 'husky-dictionary-description';
+                meaningLabel.textContent = meaning;
+                const removeButton = document.createElement('button');
+                removeButton.className = 'btn btn-clear';
+                removeButton.type = 'button';
+                removeButton.textContent = 'Apagar';
+                removeButton.addEventListener('click', () => {
+                    delete huskyLensDictionary[id];
+                    saveHuskyLensDictionary();
+                    renderHuskyLensDictionary();
+                    updateSensorWidget(latestSensorWidgetData);
+                    updateHuskyDictionaryStatus();
+                });
+                row.append(idLabel, meaningLabel, removeButton);
+                list.appendChild(row);
+            }
+            updateHuskyDictionaryStatus();
+        }
+
+        function updateHuskyDictionaryStatus(message = '') {
+            const status = document.getElementById('huskyDictionaryStatus');
+            if (status) {
+                status.textContent = message || huskyLensDictionaryWarning ||
+                    `${Object.keys(huskyLensDictionary).length} IDs guardados neste navegador.`;
+            }
+        }
+
+        function openHuskyLensDictionary() {
+            const modal = document.getElementById('huskyLensDictionaryModal');
+            modal.style.display = 'flex';
+            modal.setAttribute('aria-hidden', 'false');
+            renderHuskyLensDictionary();
+            document.getElementById('huskyDictionaryId').focus();
+        }
+
+        function closeHuskyLensDictionary() {
+            const modal = document.getElementById('huskyLensDictionaryModal');
+            modal.style.display = 'none';
+            modal.setAttribute('aria-hidden', 'true');
+        }
+
+        function saveHuskyLensDictionaryEntry(event) {
+            event.preventDefault();
+            const idInput = document.getElementById('huskyDictionaryId');
+            const meaningInput = document.getElementById('huskyDictionaryMeaning');
+            const id = Number(idInput.value);
+            const meaning = meaningInput.value.trim();
+            if (!Number.isInteger(id) || id < 1 || id > 32767 || !meaning) {
+                updateHuskyDictionaryStatus('Indica um ID entre 1 e 32767 e uma descrição.');
+                return;
+            }
+
+            huskyLensDictionary[id] = meaning;
+            const saved = saveHuskyLensDictionary();
+            renderHuskyLensDictionary();
+            updateSensorWidget(latestSensorWidgetData);
+            updateHuskyDictionaryStatus(saved
+                ? `ID ${id} guardado.`
+                : huskyLensDictionaryWarning);
+            idInput.value = '';
+            meaningInput.value = '';
+            idInput.focus();
+        }
+
         function habVerdict(score) {
             if (score === null) return 'Aguardando dados…';
             if (score >= 80) return 'Fortemente promissor';
@@ -1505,12 +1698,18 @@ const SENSOR_WIDGETS = [
     },
     {
         name: 'HuskyLens',
-        integrated: false,
-        readings: [{ label: 'Câmara / deteção IA', value: 'Não integrada nesta versão' }]
+        statusKey: 'huskylens',
+        readings: [{
+            key: 'huskylens_id',
+            label: 'ID reconhecido',
+            unit: '',
+            formatter: formatHuskyLensId
+        }]
     }
 ];
 
 function updateSensorWidget(data = {}) {
+    latestSensorWidgetData = data;
     const grid = document.getElementById('sensorGrid');
     if (!grid) return;
 
@@ -1538,17 +1737,23 @@ function updateSensorWidget(data = {}) {
             level = 'red';
             state = 'Não detetado';
         } else if (validReadings === 0) {
-            level = 'red';
-            state = 'Sem leitura';
+            level = reported === 'missing' ? 'red' : 'yellow';
+            state = reported === 'ok'
+                ? 'Sem ID visível'
+                : reported === undefined
+                    ? 'Sem dados'
+                    : 'Sem leitura';
         } else if (validReadings < sensor.readings.length || reported === undefined) {
             level = 'yellow';
             state = 'Parcial / por confirmar';
         }
 
         const readingsHtml = sensor.readings.map(reading => {
-            const value = reading.key
-                ? formatTelemetryValue(data[reading.key], reading.unit, 2)
-                : reading.value;
+            const value = reading.formatter
+                ? reading.formatter(data[reading.key])
+                : reading.key
+                    ? formatTelemetryValue(data[reading.key], reading.unit, 2)
+                    : reading.value;
             return `<div class="sensor-reading">
                 <span class="sensor-reading-name">${reading.label}</span>
                 <span class="sensor-reading-value">${value ?? 'Indisponível'}</span>
@@ -2079,6 +2284,7 @@ function selectCansat(id) {
                 "Magnetómetro Y": formatTelemetryValue(data.mag_y),
                 "Magnetómetro Z": formatTelemetryValue(data.mag_z),
                 "Rumo magnético": formatTelemetryValue(data.heading, "°"),
+                "HuskyLens": formatHuskyLensId(data.huskylens_id),
                 "Paraquedas": data.paraquedas === undefined
                     ? undefined
                     : data.paraquedas === null
@@ -2664,6 +2870,7 @@ function selectCansat(id) {
                 "heading",
                 "sea_level_pressure_hpa",
                 "sensor_status",
+                "huskylens_id",
                 "paraquedas",
                 "rssi",
                 "snr"

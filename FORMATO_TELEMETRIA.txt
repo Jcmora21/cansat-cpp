@@ -1,4 +1,4 @@
-O firmware AES-GCM cifra uma lista posicional fixa, sem nomes de campos. O envelope JSON exterior continua a incluir `cansat_id`; o número de sequência é recuperado do nonce autenticado. A lista tem exatamente esta ordem:
+O firmware AES-GCM cifra uma lista posicional fixa, sem nomes de campos. O envelope JSON exterior continua a incluir `cansat_id`; o número de sequência é recuperado do nonce autenticado. Os arrays antigos têm 17 posições; a versão atual acrescenta o ID HuskyLens na posição 17:
 
 0 mission_time_ms
 1 sensor_status
@@ -17,26 +17,32 @@ O firmware AES-GCM cifra uma lista posicional fixa, sem nomes de campos. O envel
 14 sound_adc_sum
 15 sound_adc_sum_squares
 16 sound_sample_count
+17 huskylens_id
 
-Leituras indisponíveis são `null` e mantêm o lugar. Exemplo ilustrativo do conteúdo cifrado antes da encriptação:
-[1000,"bme680=ok;sgp30=ok;tsl2561=ok;hmc5883l=ok;sen0465=ok;max4466=configured;uv=configured",25.26,55.0,1006.72,54.2,400,10,438.0,280.0,20.9,39.4,0.3,43.3,204800,850000000,500]
+Sem deteção, `huskylens_id` é `null`; os restantes valores indisponíveis
+também são `null` e mantêm as posições. Exemplo ilustrativo:
+[1000,"bme680=ok;sgp30=ok;tsl2561=ok;hmc5883l=ok;sen0465=ok;max4466=configured;uv=configured;huskylens=ok",25.26,55.0,1006.72,54.2,400,10,438.0,280.0,20.9,39.4,0.3,43.3,204800,850000000,500,2]
 
 Pela USB, o firmware cifra este array JSON num envelope JSON AES-256-GCM.
-Pelo APC220, usa um frame binário fixo de 99 bytes:
+Pelo APC220, o firmware atual usa o frame binário versão 2, com 101 bytes:
 
 offset  tamanho  significado
 0       2        magic C3 5A
-2       1        versão do frame (1)
+2       1        versão do frame (2)
 3       1        cansat_id
 4       12       nonce AES-GCM
-16      67       ciphertext
-83      16       tag AES-GCM
+16      69       ciphertext
+85      16       tag AES-GCM
 
-O plaintext binário cifrado é little-endian e tem 67 bytes:
+O plaintext binário cifrado é little-endian e tem 69 bytes:
 uint32 mission_time_ms, uint8 sensor_status_mask, 12 x float32
 (temperature, humidity, pressure, gas_resistance_kohm, eco2, tvoc, lux,
 uv_millivolts, oxygen_percent, mag_x, mag_y, mag_z), uint32 sound_adc_sum,
-uint64 sound_adc_sum_squares e uint16 sound_sample_count. Bits 0–4 da máscara
+uint64 sound_adc_sum_squares, uint16 sound_sample_count e int16 huskylens_id.
+O ID usa o intervalo 1–32767; -1 significa sem deteção. Bits 0–4 da máscara
 indicam BME680, SGP30, TSL2561, HMC5883L e SEN0465 disponíveis; bits 5–6
-indicam MAX4466 e UV configurados. NaN representa leitura indisponível.
-Nonce e tag autenticam o payload AES-GCM; o ID é autenticado como AAD.
+indicam MAX4466 e UV configurados; o bit 7 indica HuskyLens pronta. NaN
+representa leitura indisponível. Se a câmera reconhecer vários blocos, envia
+o ID do bloco de maior área. A Ground Station continua a aceitar frames
+versão 1, de 99 bytes, sem o campo HuskyLens. Nonce e tag autenticam o payload
+AES-GCM; o ID do CanSat é autenticado como AAD.

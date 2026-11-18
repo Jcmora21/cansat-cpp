@@ -8,6 +8,7 @@ Este repositório contém uma Ground Station para telemetria de **um ou vários 
 - Protocolo CANSAT-TLM v1, CRC32 para emissores simples e AES-GCM no firmware novo, com validação e estado de ligação.
 - Compatibilidade com um CanSat ou vários. O simulador incluído gera cinco CanSats; a GS não exige que todos estejam ativos.
 - Gravação automática em CSV, incluindo `cansat_id`, em `dados_voo/`; termina 30 segundos depois de todos os CanSats detetados reportarem aterragem (`SOLO` e altitude até 0,1 m).
+- Integração HuskyLens: envia o ID do maior objeto reconhecido e permite associar descrições no dicionário da Ground Station.
 - Os CSV usam `;` como separador e codificação UTF-8 com BOM para abrir as colunas corretamente no Excel com configuração regional portuguesa. A telemetria enviada pelo CanSat continua no protocolo JSON CANSAT-TLM.
 - Depois de a gravação automática terminar, a receção e a visualização da telemetria continuam. Em modo LIVE, **Exportar CSV** descarrega o ficheiro completo da sessão, sem o limite do histórico visual.
 - Botão **Pausar captura**: deixa de atualizar gráficos e CSV, mas continua a receber, validar e confirmar os pacotes com ACK. Os pacotes recebidos durante a pausa são descartados.
@@ -75,6 +76,7 @@ os atuais incluem O₂, som, resistência do gás e magnetómetro.
 | `data.mag_x`, `data.mag_y`, `data.mag_z` | Componentes do campo magnético do HMC5883L. | Número finito; opcional | `39.4` |
 | `data.heading` | Rumo magnético horizontal calculado sem compensação de inclinação. | Número finito; opcional | `12.5` |
 | `data.sensor_status` | Estado de inicialização dos sensores no CanSat. | Texto; opcional | `"bme680=ok;sgp30=ok"` |
+| `data.huskylens_id` | ID de objeto reconhecido pela HuskyLens; `null` quando não há deteção. | Inteiro 1–32767 ou `null`; opcional | `2` |
 | `link.rssi` | Potência do sinal recebido. O simulador expressa em dBm; `null` se não disponível. | Número finito ou `null` | `-78.5` |
 | `link.snr` | Relação sinal/ruído. O simulador expressa em dB; `null` se não disponível. | Número finito ou `null` | `9.4` |
 | `link.packet_loss` | Estimativa da perda de pacotes reportada pelo emissor. O simulador envia `0.0` ou `2.5`. | Número finito; opcional | `0.0` |
@@ -88,7 +90,8 @@ a GS autentica e decifra o envelope antes de processar os dados. O ficheiro
 
 ### Lista posicional cifrada do firmware
 
-O texto decifrado pelo AES-GCM é um array JSON com exatamente 17 posições.
+O texto decifrado pelo AES-GCM é um array JSON com 17 posições no firmware
+anterior e 18 na versão com HuskyLens.
 As posições não mudam quando uma leitura falta: nesse caso o valor é `null`.
 O CanSat ID segue no envelope autenticado; `sequence` é recuperado do nonce
 depois da autenticação, pelo que não ocupa uma posição no array.
@@ -110,6 +113,7 @@ depois da autenticação, pelo que não ocupa uma posição no array.
 | 14 | `sound_adc_sum` | Inteiro ou `null` |
 | 15 | `sound_adc_sum_squares` | Inteiro ou `null` |
 | 16 | `sound_sample_count` | Inteiro ou `null` |
+| 17 | `huskylens_id` | Inteiro 1–32767 ou `null` |
 
 O array permanece cifrado; não contém nomes de campos repetidos. O envelope
 exterior continua JSON para transportar protocolo, CanSat ID, nonce, texto
@@ -127,7 +131,8 @@ valor disponível entre leituras. Configura-se uma chave partilhada em
 `Sensores/CanSat/CanSatSecrets.h`, usada pela GS e pelo firmware. A GS calcula
 altitude, velocidade, aceleração e outros valores derivados; o campo
 **P0 ao nível do mar (hPa)** aplica-se localmente por CanSat. A HuskyLens e a
-ligação APC220 do novo firmware ficam para etapas posteriores.
+ligação APC220 estão descritas em [Sensores/CanSat/README.md](Sensores/CanSat/README.md).
+O dicionário de IDs é guardado localmente no navegador e não é transmitido.
 
 ## Estrutura
 
@@ -238,8 +243,9 @@ python3 groundstation_serial.py --port /dev/ttyUSB0 --apc220-binary
 ```
 
 Pela USB direta, a GS recebe linhas JSON a 115200 baud. Pelo APC220, o
-firmware transmite frames binários AES-GCM de 99 bytes a 9600 baud e 5 Hz; a
-opção `--apc220-binary` sincroniza e descodifica esses frames. O rádio e o
+firmware com HuskyLens transmite frames binários AES-GCM de 101 bytes a
+9600 baud e 5 Hz; a opção `--apc220-binary` sincroniza e descodifica esses
+frames, mantendo compatibilidade com os frames anteriores de 99 bytes. O rádio e o
 adaptador USB-UART têm de estar configurados para parâmetros compatíveis.
 Não inicies simultaneamente a variante UDP e a serial, pois ambas usam as
 mesmas portas Web e WebSocket.

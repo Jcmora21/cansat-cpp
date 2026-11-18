@@ -88,7 +88,8 @@ AES_KEY_PATH = os.path.join(
     "CanSat",
     "CanSatSecrets.h",
 )
-APC220_BINARY_TELEMETRY = struct.Struct("<IB12fIQH")
+APC220_BINARY_TELEMETRY = struct.Struct("<IB12fIQHh")
+APC220_BINARY_TELEMETRY_V1 = struct.Struct("<IB12fIQH")
 aes_telemetry_key = None
 aes_key_checked = False
 aes_key_error_logged = False
@@ -133,6 +134,7 @@ csv_headers = [
     "heading",
     "sea_level_pressure_hpa",
     "sensor_status",
+    "huskylens_id",
     "rssi",
     "snr",
 ]
@@ -329,6 +331,12 @@ def validate_telemetry_packet(packet, allow_sparse=False):
             return False, ["data.sound_sample_count"]
     if "sensor_status" in data and not isinstance(data["sensor_status"], str):
         return False, ["data.sensor_status"]
+    if "huskylens_id" in data and data["huskylens_id"] is not None:
+        if (
+            type(data["huskylens_id"]) is not int
+            or not 1 <= data["huskylens_id"] <= 32767
+        ):
+            return False, ["data.huskylens_id"]
 
     for field in REQUIRED_LINK_FIELDS:
         if field not in link:
@@ -393,13 +401,18 @@ def decrypt_encrypted_telemetry(envelope):
     """Autentica telemetria cifrada JSON ou binária e converte-a para uso interno."""
     global aes_key_error_logged
     packet_type = envelope.get("type")
-    is_binary_packet = packet_type == "encrypted_telemetry_binary"
+    is_binary_packet = packet_type in (
+        "encrypted_telemetry_binary",
+        "encrypted_telemetry_binary_v2",
+    )
+    has_huskylens_payload = packet_type == "encrypted_telemetry_binary_v2"
     if (
         envelope.get("protocol") != "CANSAT-TLM-ENC"
         or envelope.get("version") != 1
         or packet_type not in (
             "encrypted_telemetry",
             "encrypted_telemetry_binary",
+            "encrypted_telemetry_binary_v2",
         )
         or type(envelope.get("cansat_id")) is not int
         or envelope["cansat_id"] < 0
@@ -439,19 +452,38 @@ def decrypt_encrypted_telemetry(envelope):
         return None
 
     if is_binary_packet:
-        if len(plaintext) != APC220_BINARY_TELEMETRY.size:
+        binary_layout = (
+            APC220_BINARY_TELEMETRY
+            if has_huskylens_payload
+            else APC220_BINARY_TELEMETRY_V1
+        )
+        if len(plaintext) != binary_layout.size:
             if not aes_key_error_logged:
                 print("[AES-GCM] Pacote APC220 descartado: tamanho binário inválido.")
                 aes_key_error_logged = True
             return None
 
-        values = APC220_BINARY_TELEMETRY.unpack(plaintext)
+        values = binary_layout.unpack(plaintext)
         mission_time_ms, sensor_status_mask = values[:2]
         measurements = values[2:14]
-        sound_adc_sum, sound_adc_sum_squares, sound_sample_count = values[14:]
-        if sensor_status_mask & ~0x7F:
+        sound_adc_sum, sound_adc_sum_squares, sound_sample_count = values[14:17]
+        huskylens_id = values[17] if has_huskylens_payload else -1
+        status_mask_limit = 0xFF if has_huskylens_payload else 0x7F
+        if sensor_status_mask & ~status_mask_limit:
             if not aes_key_error_logged:
                 print("[AES-GCM] Pacote APC220 descartado: estado de sensor inválido.")
+                aes_key_error_logged = True
+            return None
+        if has_huskylens_payload and (
+            huskylens_id < -1
+            or huskylens_id == 0
+            or (
+                huskylens_id > 0
+                and not sensor_status_mask & (1 << 7)
+            )
+        ):
+            if not aes_key_error_logged:
+                print("[AES-GCM] Pacote APC220 descartado: ID HuskyLens inválido.")
                 aes_key_error_logged = True
             return None
         if any(math.isinf(value) for value in measurements):
@@ -480,6 +512,8 @@ def decrypt_encrypted_telemetry(envelope):
             "max4466",
             "uv",
         )
+        if has_huskylens_payload:
+            sensor_names += ("huskylens",)
         sensor_status_values = [
             "ok" if sensor_status_mask & (1 << index) else "missing"
             for index in range(5)
@@ -488,6 +522,10 @@ def decrypt_encrypted_telemetry(envelope):
             "configured" if sensor_status_mask & (1 << index) else "missing"
             for index in (5, 6)
         )
+        if has_huskylens_payload:
+            sensor_status_values.append(
+                "ok" if sensor_status_mask & (1 << 7) else "missing"
+            )
         sensor_status = ";".join(
             f"{name}={value}"
             for name, value in zip(sensor_names, sensor_status_values)
@@ -514,6 +552,9 @@ def decrypt_encrypted_telemetry(envelope):
             data["sound_adc_sum"] = sound_adc_sum
             data["sound_adc_sum_squares"] = sound_adc_sum_squares
             data["sound_sample_count"] = sound_sample_count
+        data["huskylens_id"] = (
+            huskylens_id if huskylens_id > 0 else None
+        )
 
         return {
             "protocol": "CANSAT-TLM",
@@ -540,7 +581,7 @@ def decrypt_encrypted_telemetry(envelope):
 
     if (
         not isinstance(packet, list)
-        or len(packet) != 17
+        or len(packet) not in (17, 18)
         or type(packet[0]) is not int
         or not 0 <= packet[0] <= 2**63 - 1
         or not isinstance(packet[1], str)
@@ -569,6 +610,17 @@ def decrypt_encrypted_telemetry(envelope):
             print("[AES-GCM] Pacote descartado: estatísticas de som inválidas.")
             aes_key_error_logged = True
         return None
+    if len(packet) == 18 and (
+        packet[17] is not None
+        and (
+            type(packet[17]) is not int
+            or not 1 <= packet[17] <= 32767
+        )
+    ):
+        if not aes_key_error_logged:
+            print("[AES-GCM] Pacote descartado: ID HuskyLens inválido.")
+            aes_key_error_logged = True
+        return None
 
     compact_data_fields = (
         "temperature",
@@ -593,6 +645,8 @@ def decrypt_encrypted_telemetry(envelope):
     for field, value in zip(compact_data_fields, packet[2:]):
         if value is not None:
             data[field] = value
+    if len(packet) == 18:
+        data["huskylens_id"] = packet[17]
 
     packet = {
         "protocol": "CANSAT-TLM",
@@ -1093,6 +1147,7 @@ def transport_receiver(transport_factory=UDPTransport):
         is_encrypted_packet = packet.get("type") in (
             "encrypted_telemetry",
             "encrypted_telemetry_binary",
+            "encrypted_telemetry_binary_v2",
         )
         if is_encrypted_packet:
             packet = decrypt_encrypted_telemetry(packet)
@@ -1221,6 +1276,7 @@ def transport_receiver(transport_factory=UDPTransport):
                     "sea_level_pressure_hpa"
                 ),
                 "sensor_status": data_block.get("sensor_status"),
+                "huskylens_id": data_block.get("huskylens_id"),
                 "rssi": link_block.get("rssi"),
                 "snr": link_block.get("snr"),
             }

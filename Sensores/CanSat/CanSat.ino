@@ -12,6 +12,7 @@
 #include <Adafruit_TSL2561_U.h>
 #include <Adafruit_HMC5883_U.h>
 #include "DFRobot_MultiGasSensor.h"
+#include <HUSKYLENS.h>
 #include <ArduinoJson.h>
 #include <mbedtls/base64.h>
 #include <mbedtls/gcm.h>
@@ -30,6 +31,8 @@ constexpr uint8_t SDA_PIN = 6;
 constexpr uint8_t SCL_PIN = 7;
 constexpr uint8_t UV_PIN = 0;
 constexpr uint8_t MIC_PIN = 1;
+constexpr uint8_t HUSKYLENS_RX_PIN = 4;
+constexpr uint8_t HUSKYLENS_TX_PIN = 5;
 constexpr uint8_t APC220_TX_PIN = 16;
 constexpr uint8_t APC220_RX_PIN = 17;
 
@@ -45,6 +48,9 @@ constexpr uint32_t TELEMETRY_START_DELAY_MS = 10000;
 constexpr uint32_t TELEMETRY_INTERVAL_MS = 200;
 constexpr uint32_t APC220_BAUD_RATE = 9600;
 constexpr uint32_t APC220_INTERVAL_MS = TELEMETRY_INTERVAL_MS;
+constexpr uint32_t HUSKYLENS_BAUD_RATE = 9600;
+constexpr uint32_t HUSKYLENS_INTERVAL_MS = 200;
+constexpr uint32_t HUSKYLENS_TIMEOUT_MS = 30;
 constexpr uint32_t AUXILIARY_SENSOR_INTERVAL_MS = 200;
 constexpr uint16_t MIC_SAMPLE_COUNT = 500;
 constexpr uint16_t MIC_SAMPLE_INTERVAL_US = 200;
@@ -52,7 +58,7 @@ constexpr size_t AES_KEY_SIZE = 32;
 constexpr size_t AES_GCM_NONCE_SIZE = 12;
 constexpr size_t AES_GCM_TAG_SIZE = 16;
 constexpr size_t APC220_HEADER_SIZE = 4;
-constexpr size_t APC220_BINARY_PAYLOAD_SIZE = 67;
+constexpr size_t APC220_BINARY_PAYLOAD_SIZE = 69;
 constexpr size_t APC220_FRAME_SIZE =
     APC220_HEADER_SIZE + AES_GCM_NONCE_SIZE + APC220_BINARY_PAYLOAD_SIZE +
     AES_GCM_TAG_SIZE;
@@ -66,12 +72,14 @@ Adafruit_SGP30 sgp;
 Adafruit_TSL2561_Unified tsl(TSL2561_ADDR_FLOAT, 12345);
 Adafruit_HMC5883_Unified magnetometer(12345);
 DFRobot_GAS_I2C oxygenSensor(&Wire, O2_I2C_ADDRESS);
+HUSKYLENS huskylens;
 
 bool bmeAvailable = false;
 bool sgpAvailable = false;
 bool tslAvailable = false;
 bool magnetometerAvailable = false;
 bool oxygenAvailable = false;
+bool huskylensAvailable = false;
 bool bmeReadingPending = false;
 uint32_t usbSequenceNumber = 0;
 uint32_t apc220SequenceNumber = 0;
@@ -80,6 +88,7 @@ uint32_t nextApc220TelemetryTime = 0;
 uint32_t previousBmeStartTime = 0;
 uint32_t previousSgp30Time = 0;
 uint32_t previousAuxiliarySensorTime = 0;
+uint32_t previousHuskyLensTime = 0;
 uint32_t bmeReadingReadyAt = 0;
 uint32_t nextUvSampleTime = 0;
 uint8_t uvSampleCount = 0;
@@ -96,7 +105,7 @@ bool encryptionReady = false;
 char telemetryJson[MAX_TELEMETRY_JSON_SIZE];
 uint8_t encryptedTelemetry[MAX_TELEMETRY_JSON_SIZE];
 char encryptedTelemetryBase64[MAX_TELEMETRY_BASE64_SIZE];
-char sensorStatusText[128];
+char sensorStatusText[160];
 StaticJsonDocument<2048> telemetryPacket;
 StaticJsonDocument<4096> encryptedEnvelope;
 
@@ -114,6 +123,7 @@ struct TelemetrySample {
   uint32_t soundAdcSum = 0;
   uint64_t soundAdcSumSquares = 0;
   uint16_t soundSampleCount = 0;
+  int16_t huskylensId = -1;
   float magX = NAN;
   float magY = NAN;
   float magZ = NAN;
@@ -147,7 +157,7 @@ void appendFloat32(uint8_t *output, size_t &offset, float value) {
   appendLittleEndian(output, offset, bits, sizeof(bits));
 }
 
-// Serializa as leituras medidas em 67 bytes, sem nomes de campos nem Base64.
+// Serializa as leituras medidas em 69 bytes, sem nomes de campos nem Base64.
 size_t encodeApc220Telemetry(const TelemetrySample &sample, uint32_t now,
                              uint8_t *output) {
   size_t offset = 0;
@@ -161,6 +171,7 @@ size_t encodeApc220Telemetry(const TelemetrySample &sample, uint32_t now,
   status |= oxygenAvailable ? 1U << 4 : 0;
   status |= 1U << 5;
   status |= 1U << 6;
+  status |= huskylensAvailable ? 1U << 7 : 0;
   output[offset++] = status;
 
   const float measurements[] = {
@@ -180,6 +191,9 @@ size_t encodeApc220Telemetry(const TelemetrySample &sample, uint32_t now,
                      sizeof(sample.soundAdcSumSquares));
   appendLittleEndian(output, offset, sample.soundSampleCount,
                      sizeof(sample.soundSampleCount));
+  appendLittleEndian(output, offset,
+                     static_cast<uint16_t>(sample.huskylensId),
+                     sizeof(sample.huskylensId));
   return offset;
 }
 
@@ -264,17 +278,50 @@ void initializeSensors() {
     oxygenSensor.changeAcquireMode(oxygenSensor.INITIATIVE);
   }
 
+  Serial0.begin(HUSKYLENS_BAUD_RATE, SERIAL_8N1, HUSKYLENS_RX_PIN,
+                HUSKYLENS_TX_PIN);
+  huskylens.setTimeOutDuration(HUSKYLENS_TIMEOUT_MS);
+  huskylensAvailable = huskylens.begin(Serial0);
+  if (huskylensAvailable) {
+    huskylensAvailable =
+        huskylens.writeAlgorithm(ALGORITHM_OBJECT_RECOGNITION);
+  }
+  Serial.println(huskylensAvailable
+                     ? "[HuskyLens] Object Recognition pronto."
+                     : "[HuskyLens] Indisponivel; verificar ligacoes e algoritmo.");
+
   analogReadResolution(12);
   analogSetPinAttenuation(UV_PIN, ADC_11db);
   analogSetPinAttenuation(MIC_PIN, ADC_11db);
   snprintf(
       sensorStatusText, sizeof(sensorStatusText),
       "bme680=%s;sgp30=%s;tsl2561=%s;hmc5883l=%s;sen0465=%s;"
-      "max4466=configured;uv=configured",
+      "max4466=configured;uv=configured;huskylens=%s",
       bmeAvailable ? "ok" : "missing", sgpAvailable ? "ok" : "missing",
       tslAvailable ? "ok" : "missing",
       magnetometerAvailable ? "ok" : "missing",
-      oxygenAvailable ? "ok" : "missing");
+      oxygenAvailable ? "ok" : "missing",
+      huskylensAvailable ? "ok" : "missing");
+}
+
+// Escolhe o maior bloco reconhecido no frame atual; -1 significa sem deteção.
+void readHuskyLens(TelemetrySample &sample) {
+  sample.huskylensId = -1;
+  if (!huskylensAvailable || !huskylens.request()) return;
+
+  int32_t largestBlockArea = 0;
+  const int16_t resultCount = huskylens.available();
+  for (int16_t index = 0; index < resultCount; ++index) {
+    const HUSKYLENSResult result = huskylens.read();
+    if (result.command != COMMAND_RETURN_BLOCK || result.ID <= 0) continue;
+
+    const int32_t blockArea =
+        static_cast<int32_t>(result.width) * result.height;
+    if (blockArea > largestBlockArea) {
+      largestBlockArea = blockArea;
+      sample.huskylensId = result.ID;
+    }
+  }
 }
 
 // Faz a leitura BME680 sem bloquear à espera do fim da conversão.
@@ -415,7 +462,7 @@ void sendEncryptedTelemetry(const uint8_t *plaintext, size_t plaintextLength,
     uint8_t frame[APC220_FRAME_SIZE];
     frame[0] = 0xC3;
     frame[1] = 0x5A;
-    frame[2] = 1;
+    frame[2] = 2;
     frame[3] = CANSAT_ID;
     memcpy(frame + APC220_HEADER_SIZE, nonce, sizeof(nonce));
     memcpy(frame + APC220_HEADER_SIZE + sizeof(nonce), encryptedTelemetry,
@@ -497,6 +544,11 @@ void sendTelemetry(const TelemetrySample &sample, uint32_t now,
     packet.add(nullptr);
     packet.add(nullptr);
   }
+  if (sample.huskylensId > 0) {
+    packet.add(sample.huskylensId);
+  } else {
+    packet.add(nullptr);
+  }
 
   const size_t expectedJsonLength = measureJson(packet);
   const size_t jsonLength =
@@ -563,6 +615,10 @@ void loop() {
     readTsl2561(latestTelemetrySample);
     readMagnetometer(latestTelemetrySample);
     readOxygen(latestTelemetrySample);
+  }
+  if (now - previousHuskyLensTime >= HUSKYLENS_INTERVAL_MS) {
+    previousHuskyLensTime = now;
+    readHuskyLens(latestTelemetrySample);
   }
 
   const uint32_t telemetryNow = millis();

@@ -35,29 +35,34 @@ chave AES.
 
 ## Formato compacto da telemetria
 
-O conteúdo cifrado é um array JSON posicional de 17 valores, sem nomes de
-campos. A ordem é fixa: `[mission_time_ms, sensor_status, temperature,
+O conteúdo cifrado pela USB é um array JSON posicional de 18 valores, sem
+nomes de campos (a GS continua a aceitar arrays antigos de 17 valores). A
+ordem é fixa: `[mission_time_ms, sensor_status, temperature,
 humidity, pressure, gas_resistance_kohm, eco2, tvoc, lux, uv_millivolts,
 oxygen_percent, mag_x, mag_y, mag_z, sound_adc_sum,
-sound_adc_sum_squares, sound_sample_count]`. Uma medição indisponível aparece
-como `null`, sem deslocar as posições seguintes. O CanSat ID está no envelope
+sound_adc_sum_squares, sound_sample_count, huskylens_id]`. Uma medição
+indisponível aparece como `null`, sem deslocar as posições seguintes; o ID
+HuskyLens é `null` quando não há deteção. O CanSat ID está no envelope
 autenticado; a GS obtém o número de sequência a partir do nonce autenticado.
 USB e APC220 mantêm sequências independentes e prefixos de nonce distintos,
 para que pacotes recebidos por ligações diferentes não reutilizem nonces.
-Pela USB, o conteúdo AES-GCM é o array JSON. Pelo APC220, a mesma telemetria
-é codificada num frame binário compacto de 99 bytes, abaixo do buffer de
+Pela USB, o conteúdo AES-GCM é o array JSON. Pelo APC220, a telemetria atual
+é codificada num frame binário compacto de 101 bytes, abaixo do buffer de
 256 bytes indicado para o módulo.
 
-O frame APC220 tem esta estrutura: `C3 5A` (sincronização), versão `01`,
-CanSat ID (1 byte), nonce (12 bytes), ciphertext (67 bytes) e tag AES-GCM
-(16 bytes). O plaintext binário é little-endian: `mission_time_ms` uint32,
-estado dos sensores (1 byte; bits 0–4 para BME680, SGP30, TSL2561, HMC5883L
-e SEN0465; bits 5–6 para MAX4466 e UV configurados), 12 valores float32
+O frame APC220 versão 2 tem esta estrutura: `C3 5A` (sincronização), versão
+`02`, CanSat ID (1 byte), nonce (12 bytes), ciphertext (69 bytes) e tag
+AES-GCM (16 bytes). O plaintext binário é little-endian e tem 69 bytes:
+`mission_time_ms` uint32, estado dos sensores (1 byte; bits 0–4 para BME680,
+SGP30, TSL2561, HMC5883L e SEN0465; bits 5–6 para MAX4466 e UV configurados;
+bit 7 para HuskyLens pronta), 12 valores float32
 (`temperature`, `humidity`, `pressure`, `gas_resistance_kohm`, `eco2`,
 `tvoc`, `lux`, `uv_millivolts`, `oxygen_percent`, `mag_x`, `mag_y`, `mag_z`),
 `sound_adc_sum` uint32, `sound_adc_sum_squares` uint64 e
-`sound_sample_count` uint16. NaN significa uma leitura indisponível; zero
-amostras significa que as estatísticas do som não estão disponíveis.
+`sound_sample_count` uint16, seguido de `huskylens_id` int16 (-1 significa
+sem deteção). NaN significa uma leitura indisponível; zero amostras significa
+que as estatísticas do som não estão disponíveis. A GS também aceita frames
+versão 1, de 99 bytes, sem o campo HuskyLens.
 
 ## Bibliotecas Arduino
 
@@ -70,6 +75,7 @@ Instala pelo Arduino IDE > Library Manager:
 - Adafruit HMC5883 Unified
 - Adafruit BusIO (dependência das bibliotecas Adafruit)
 - ArduinoJson
+- HuskyLens (cópia incluída em `CanSat_ESP/HUSKYLENS/HUSKYLENS`)
 
 O sensor Gravity SEN0465 usa `DFRobot_MultiGasSensor`. A biblioteca está no
 ZIP `../Gravity O₂ SEN0465/DFRobot_MultiGasSensor-main.zip`; extrai a pasta da
@@ -77,6 +83,10 @@ biblioteca para a pasta `libraries` do Arduino IDE ou instala a biblioteca
 DFRobot correspondente.
 
 `Wire`, `SPI` e as funções ADC são fornecidas pelo core ESP32 Arduino.
+
+Para a IDE reconhecer a cópia incluída da biblioteca HuskyLens, copia a pasta
+`Sensores/CanSat_ESP/HUSKYLENS/HUSKYLENS` para a pasta
+`libraries/HUSKYLENS` do sketchbook Arduino e reinicia a IDE.
 
 ## Mapa de ligações usado pelo sketch
 
@@ -89,11 +99,34 @@ DFRobot correspondente.
 | Gravity SEN0465 O2 | I2C | SDA GPIO6, SCL GPIO7, endereço 0x74 |
 | GUVA-S12SD UV | Analógico | AOUT GPIO0 |
 | MAX4466 | Analógico | OUT GPIO1 |
+| HuskyLens | UART0, 9600 baud | Husky TX para ESP RX GPIO4; Husky RX para ESP TX GPIO5 |
 | APC220 | UART1 | ESP TX GPIO16, ESP RX GPIO17 |
 
 O GPIO1 foi escolhido para o MAX4466 para resolver a colisão com o UV no
 GPIO0. Confirma esta ligação na placa antes de alimentar o circuito. Os
 sensores I2C partilham o mesmo barramento configurado a 100 kHz.
+
+## HuskyLens: reconhecimento e IDs
+
+Liga a HuskyLens por UART cruzada: TX da câmera ao GPIO4 (RX do ESP32-C6),
+RX da câmera ao GPIO5 (TX do ESP32-C6) e GND comum. A alimentação e os níveis
+lógicos devem seguir as especificações do teu módulo; não apliques 5 V aos
+GPIOs do ESP32-C6. A UART da HuskyLens usa 9600 baud. Mantém **USB CDC On
+Boot** ativado na configuração da placa para a saída USB a 115200 baud.
+
+No ecrã da HuskyLens, seleciona **Object Recognition**, aprende os objetos e
+atribui-lhes IDs. O firmware também seleciona esse algoritmo ao iniciar. A
+cada pedido, lê os blocos reconhecidos e transmite o ID do bloco de maior
+área; sem deteção envia `null` pela USB e `-1` no payload binário. Se a câmera
+estiver desligada ou não aceitar o algoritmo, o firmware continua a transmitir
+os outros sensores e indica `huskylens=missing` em `sensor_status`.
+
+Na Ground Station, o botão **Dicionário HuskyLens** permite associar um nome
+ou significado a cada ID. O dicionário é guardado no armazenamento local do
+navegador e pode conter quantas entradas o espaço disponível permitir. A
+descrição não é enviada pelo CanSat nem ocupa espaço no APC220; o rádio envia
+apenas o ID numérico. IDs aprendidos na HuskyLens e descrições na GS são duas
+configurações independentes que têm de corresponder.
 
 ## Ligação e receção pelo APC220
 
@@ -123,11 +156,12 @@ IDE e inicia a GS no modo binário APC220:
 py -3 groundstation_serial.py --port COM8 --apc220-binary
 ```
 
-O rádio transmite cinco frames binários AES-GCM de 99 bytes por segundo. O
+O rádio transmite cinco frames binários AES-GCM de 101 bytes por segundo. O
 produto indica buffer de 256 bytes e alcance especificado a 9600 bps; o
-formato compacto cabe no buffer e reduz o débito do payload para cerca de
-4,95 kbit/s na UART a 9600 baud (8N1). O desempenho RF real depende da
-configuração dos módulos e deve ser confirmado em teste.
+formato compacto cabe no buffer e ocupa cerca de 52,6% da capacidade da UART
+a 9600 baud (8N1). O recetor continua a aceitar os frames anteriores de
+99 bytes. O desempenho RF real depende da configuração dos módulos e deve
+ser confirmado em teste.
 
 ## Dados e limitações nesta fase
 
@@ -166,8 +200,8 @@ configuração dos módulos e deve ser confirmado em teste.
    widget com os sensores, as medições, unidades e estado visual. O2 e
    humidade são apresentados com duas casas decimais; o painel UV usa a escala
    0–10. O nível do microfone em dBFS é calculado na GS e é relativo; não é
-   dB SPL calibrado.
-   A HuskyLens aparece como não integrada nesta versão.
+   dB SPL calibrado. O widget de sensores apresenta o ID reconhecido e a
+   descrição configurada no dicionário HuskyLens.
 4. No painel **Referência de pressão para altitude**, introduz P0 em hPa e
    clica **Aplicar P0**. Com um CanSat selecionado, a referência fica
    associada a esse ID; sem seleção, é usada para o último CanSat que
